@@ -1,0 +1,16 @@
+
+# Private laptop authentication token
+.agent-token
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
+
+# Agent lock & runtime logs
+.agent.pid
+logs/
+
+# Dependencies & build outputs
+node_modules/
+dist/

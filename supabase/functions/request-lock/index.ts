@@ -1,0 +1,120 @@
+import { createClient } from "npm:@supabase/supabase-js@2";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+    },
+  });
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
+
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "Method not allowed" }, 405);
+  }
+
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const supabaseKey =
+    Deno.env.get("SUPABASE_ANON_KEY") ??
+    Deno.env.get("SUPABASE_PUBLISHABLE_KEY");
+
+  if (!supabaseUrl || !supabaseKey) {
+    console.error("Missing Supabase environment configuration.");
+    return jsonResponse({ error: "Server configuration error" }, 500);
+  }
+
+  const authorization = req.headers.get("Authorization");
+
+  if (!authorization?.startsWith("Bearer ")) {
+    return jsonResponse({ error: "Authentication required" }, 401);
+  }
+
+  const supabase = createClient(supabaseUrl, supabaseKey, {
+    global: {
+      headers: { Authorization: authorization },
+    },
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+
+  // Verify the signed-in user.
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return jsonResponse({ error: "Invalid or expired session" }, 401);
+  }
+
+  let body: { device_id?: string };
+
+  try {
+    body = await req.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON body" }, 400);
+  }
+
+  const deviceId = body?.device_id;
+
+  const uuidPattern =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  if (typeof deviceId !== "string" || !uuidPattern.test(deviceId)) {
+    return jsonResponse({ error: "A valid device_id is required" }, 400);
+  }
+
+  // Verify that this device belongs to the signed-in user.
+  const { data: device, error: deviceError } = await supabase
+    .from("devices")
+    .select("id")
+    .eq("id", deviceId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (deviceError) {
+    console.error("Device lookup failed:", deviceError.message);
+    return jsonResponse({ error: "Could not verify device ownership" }, 500);
+  }
+
+  if (!device) {
+    return jsonResponse({ error: "Device not found" }, 404);
+  }
+
+  // Create a pending lock command under the user's permissions and RLS.
+  const { data: command, error: insertError } = await supabase
+    .from("commands")
+    .insert({
+      device_id: deviceId,
+      user_id: user.id,
+      action: "lock",
+      status: "pending",
+    })
+    .select("id, device_id, action, status, created_at")
+    .single();
+
+  if (insertError) {
+    console.error("Command insert failed:", insertError.message);
+    return jsonResponse(
+      { error: "Could not create lock command. Check table permissions." },
+      403
+    );
+  }
+
+  return jsonResponse({ success: true, command });
+});
