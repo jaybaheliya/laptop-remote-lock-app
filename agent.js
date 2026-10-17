@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const { spawn } = require("node:child_process");
 
 if (process.platform !== "win32") {
@@ -384,81 +385,92 @@ function shutdownWindows() {
   });
 }
 
+function getCaptureScriptPath() {
+  const scriptPath = path.join(os.tmpdir(), "win_screen_capture.ps1");
+  const scriptContent = `param([string]$OutputPath)
+Add-Type -TypeDefinition @"
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+
+public class Win32Capture {
+    [DllImport("user32.dll")] public static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")] public static extern IntPtr GetWindowDC(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
+    [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+    [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hDC);
+    [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleBitmap(IntPtr hDC, int nWidth, int nHeight);
+    [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+    [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr hObject);
+    [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr hObject, int nXDest, int nYDest, int nWidth, int nHeight, IntPtr hObjectSource, int nXSrc, int nYSrc, int dwRop);
+
+    public static void SaveScreen(string path) {
+        int w = GetSystemMetrics(0);
+        int h = GetSystemMetrics(1);
+        IntPtr hWnd = GetDesktopWindow();
+        IntPtr hDeskDC = GetWindowDC(hWnd);
+        IntPtr hMemDC = CreateCompatibleDC(hDeskDC);
+        IntPtr hBmp = CreateCompatibleBitmap(hDeskDC, w, h);
+        IntPtr hOld = SelectObject(hMemDC, hBmp);
+        BitBlt(hMemDC, 0, 0, w, h, hDeskDC, 0, 0, 0x00CC0020);
+        using (Bitmap bmp = Image.FromHbitmap(hBmp)) {
+            bmp.Save(path, ImageFormat.Jpeg);
+        }
+        SelectObject(hMemDC, hOld);
+        DeleteObject(hBmp);
+        DeleteDC(hMemDC);
+        ReleaseDC(hWnd, hDeskDC);
+    }
+}
+"@ -ReferencedAssemblies System.Drawing
+
+[Win32Capture]::SaveScreen($OutputPath)
+`;
+  if (!fs.existsSync(scriptPath)) {
+    fs.writeFileSync(scriptPath, scriptContent, "utf8");
+  }
+  return scriptPath;
+}
+
 function captureScreen() {
   return new Promise((resolve, reject) => {
-    const psScript = `
-      Add-Type -ReferencedAssemblies System.Drawing, System.Windows.Forms -TypeDefinition @'
-      using System;
-      using System.Drawing;
-      using System.Drawing.Imaging;
-      using System.Runtime.InteropServices;
-      using System.Windows.Forms;
+    try {
+      const scriptPath = getCaptureScriptPath();
+      const tempOutput = path.join(os.tmpdir(), `cap_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.jpg`);
 
-      public class NativeCapture {
-          [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
-          [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
-          [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
-          [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr hDC);
-          [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr hDC, int nWidth, int nHeight);
-          [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
-          [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr hObject);
-          [DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr hObject, int nXDest, int nYDest, int nWidth, int nHeight, IntPtr hObjectSource, int nXSrc, int nYSrc, int dwRop);
+      const child = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-OutputPath", tempOutput],
+        { shell: false, windowsHide: true }
+      );
 
-          public static string Capture(string path) {
-              int w = Screen.PrimaryScreen.Bounds.Width;
-              int h = Screen.PrimaryScreen.Bounds.Height;
-              IntPtr hDeskDC = GetDC(IntPtr.Zero);
-              IntPtr hMemDC = CreateCompatibleDC(hDeskDC);
-              IntPtr hBmp = CreateCompatibleBitmap(hDeskDC, w, h);
-              IntPtr hOld = SelectObject(hMemDC, hBmp);
-              BitBlt(hMemDC, 0, 0, w, h, hDeskDC, 0, 0, 0x00CC0020);
-              Bitmap bmp = Image.FromHbitmap(hBmp);
-              bmp.Save(path, ImageFormat.Jpeg);
-              bmp.Dispose();
-              SelectObject(hMemDC, hOld);
-              DeleteObject(hBmp);
-              DeleteDC(hMemDC);
-              ReleaseDC(IntPtr.Zero, hDeskDC);
-              return path;
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+
+      child.once("close", (code) => {
+        if (code === 0 && fs.existsSync(tempOutput)) {
+          try {
+            const imgBuffer = fs.readFileSync(tempOutput);
+            const base64Data = "data:image/jpeg;base64," + imgBuffer.toString("base64");
+            try { fs.unlinkSync(tempOutput); } catch {}
+            resolve(base64Data);
+            return;
+          } catch (readErr) {
+            reject(new Error("Could not read screenshot file: " + readErr.message));
+            return;
           }
-      }
-'@
-      $tmp = Join-Path $env:TEMP ("capture_" + [System.Guid]::NewGuid().ToString() + ".jpg")
-      [NativeCapture]::Capture($tmp)
-      Write-Output $tmp
-    `;
-
-    const child = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psScript],
-      { shell: false, windowsHide: true }
-    );
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-
-    child.once("close", (code) => {
-      const filePath = stdout.trim();
-      if (code === 0 && filePath && fs.existsSync(filePath)) {
-        try {
-          const imgBuffer = fs.readFileSync(filePath);
-          const base64Data = "data:image/jpeg;base64," + imgBuffer.toString("base64");
-          try { fs.unlinkSync(filePath); } catch {}
-          resolve(base64Data);
-          return;
-        } catch (readErr) {
-          reject(new Error("Could not read screenshot file: " + readErr.message));
-          return;
         }
-      }
-      reject(new Error(`Screenshot capture failed (code ${code}): ${stderr.trim() || "Unknown error"}`));
-    });
+        reject(new Error(`Screenshot capture failed (code ${code}): ${stderr.trim() || "Unknown error"}`));
+      });
 
-    child.once("error", (err) => {
-      reject(new Error(`Screenshot process spawn failed: ${err.message}`));
-    });
+      child.once("error", (err) => {
+        reject(new Error(`Screenshot process spawn failed: ${err.message}`));
+      });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
