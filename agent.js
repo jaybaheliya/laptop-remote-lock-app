@@ -69,9 +69,16 @@ function loadConfigFile(filePath, configDir) {
 
   let parsed;
   try {
-    parsed = JSON.parse(rawJson);
+    const trimmed = rawJson.trim();
+    if (trimmed.startsWith("{")) {
+      parsed = JSON.parse(trimmed);
+    } else {
+      // Decode Base64 string into UTF-8 JSON
+      const decoded = Buffer.from(trimmed, "base64").toString("utf8");
+      parsed = JSON.parse(decoded);
+    }
   } catch {
-    console.error(`Invalid JSON in configuration file: ${filePath}`);
+    console.error(`Invalid configuration or unreadable JSON in: ${filePath}`);
     process.exit(1);
   }
 

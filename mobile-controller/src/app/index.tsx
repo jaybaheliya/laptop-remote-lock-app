@@ -49,6 +49,14 @@ export default function HomeScreen() {
   const [newLaptopName, setNewLaptopName] = useState("");
   const [addDeviceError, setAddDeviceError] = useState("");
 
+  // Pairing Credentials modal state
+  const [isPairingModalVisible, setIsPairingModalVisible] = useState(false);
+  const [pairedDeviceName, setPairedDeviceName] = useState("");
+  const [pairingKey, setPairingKey] = useState("");
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [storedPairingKeys, setStoredPairingKeys] = useState<{ [deviceId: string]: string }>({});
+  const [deletingLaptop, setDeletingLaptop] = useState(false);
+
   const [latestCommand, setLatestCommand] = useState<LockCommand | null>(null);
   const [commandHistory, setCommandHistory] = useState<LockCommand[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -369,6 +377,7 @@ export default function HomeScreen() {
       });
 
       if (error) {
+        setMessage(error.message);
         Alert.alert("Sign in failed", error.message);
       }
     } finally {
@@ -397,16 +406,22 @@ export default function HomeScreen() {
       });
 
       if (error) {
+        setMessage(error.message);
         Alert.alert("Sign up failed", error.message);
         return;
       }
 
       if (!data.session) {
+        setMessage("Account created! Please check your email to confirm your account before signing in.");
         Alert.alert(
           "Check your email",
           "Your account was created. Please verify your email, then sign in."
         );
+      } else {
+        setMessage("Account created and signed in!");
       }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "An unexpected sign up error occurred.");
     } finally {
       if (isMountedRef.current) setAuthLoading(false);
     }
@@ -468,21 +483,71 @@ export default function HomeScreen() {
 
       // Successful registration
       const registeredDevice = data.device as Device;
+      const returnedToken = typeof data.token === "string" ? data.token : "";
 
-      // Reset modal state
+      // Reset add modal state
       setIsAddModalVisible(false);
       setNewLaptopName("");
       setAddDeviceError("");
+
+      // Construct portable configuration object
+      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || "";
+      const supabasePublishableKey = process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
+
+      let encodedPairingKey = "";
+      if (returnedToken && registeredDevice?.id) {
+        const configPayload = {
+          deviceId: registeredDevice.id,
+          supabaseUrl,
+          supabasePublishableKey,
+          token: returnedToken,
+          pollIntervalMs: 5000,
+          testMode: false,
+        };
+        try {
+          const jsonStr = JSON.stringify(configPayload);
+          if (typeof btoa === "function") {
+            encodedPairingKey = btoa(unescape(encodeURIComponent(jsonStr)));
+          } else {
+            // Pure JS base64 fallback for environments without global btoa
+            const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+            let output = "";
+            const utf8Str = unescape(encodeURIComponent(jsonStr));
+            for (let i = 0; i < utf8Str.length; i += 3) {
+              const b1 = utf8Str.charCodeAt(i);
+              const b2 = utf8Str.charCodeAt(i + 1);
+              const b3 = utf8Str.charCodeAt(i + 2);
+              output += chars.charAt(b1 >> 2);
+              output += chars.charAt(((b1 & 3) << 4) | (b2 >> 4));
+              output += isNaN(b2) ? "=" : chars.charAt(((b2 & 15) << 2) | (b3 >> 6));
+              output += isNaN(b3) ? "=" : chars.charAt(b3 & 63);
+            }
+            encodedPairingKey = output;
+          }
+        } catch {
+          encodedPairingKey = JSON.stringify(configPayload);
+        }
+      }
 
       // Refresh devices list so new device is visible, and set selected device
       await fetchDevice(userId, true);
       setDevice(registeredDevice);
 
-      // Safe user-facing feedback: Note that Windows-agent configuration is not implemented yet
-      Alert.alert(
-        "Laptop Registered",
-        `"${registeredDevice.name}" has been registered successfully.\n\nNote: Automated Windows-agent provisioning is not implemented yet. The secure agent credential has been generated on the server.`
-      );
+      if (encodedPairingKey) {
+        setStoredPairingKeys((prev) => ({
+          ...prev,
+          [registeredDevice.id]: encodedPairingKey,
+        }));
+        setPairedDeviceName(registeredDevice.name);
+        setPairingKey(encodedPairingKey);
+        setCopiedKey(false);
+        setIsPairingModalVisible(true);
+      } else {
+        Alert.alert(
+          "Laptop Registered",
+          `"${registeredDevice.name}" has been registered successfully.`
+        );
+      }
       setMessage(`"${registeredDevice.name}" registered.`);
     } catch (err) {
       const errMsg =
@@ -490,6 +555,90 @@ export default function HomeScreen() {
       setAddDeviceError(errMsg);
     } finally {
       if (isMountedRef.current) setRegistering(false);
+    }
+  }
+
+  async function handleDeleteLaptop(laptopToDelete: Device) {
+    const userId = session?.user?.id;
+    if (!userId) return;
+
+    const performDelete = async () => {
+      setDeletingLaptop(true);
+      setMessage("");
+
+      try {
+        // Delete related commands first to respect foreign key constraints
+        await supabase
+          .from("commands")
+          .delete()
+          .eq("device_id", laptopToDelete.id)
+          .eq("user_id", userId);
+
+        // Delete device credentials
+        await supabase
+          .from("device_agent_credentials")
+          .delete()
+          .eq("device_id", laptopToDelete.id)
+          .eq("user_id", userId);
+
+        // Delete device record
+        const { error } = await supabase
+          .from("devices")
+          .delete()
+          .eq("id", laptopToDelete.id)
+          .eq("user_id", userId);
+
+        if (error) {
+          Alert.alert("Delete failed", error.message);
+          return;
+        }
+
+        // Clean up locally stored pairing key if any
+        setStoredPairingKeys((prev) => {
+          const updated = { ...prev };
+          delete updated[laptopToDelete.id];
+          return updated;
+        });
+
+        // Refresh devices list
+        await fetchDevice(userId, true);
+        Alert.alert(
+          "Laptop Removed",
+          `"${laptopToDelete.name}" has been removed from your dashboard.`
+        );
+        setMessage(`"${laptopToDelete.name}" removed.`);
+      } catch (err) {
+        Alert.alert(
+          "Error",
+          err instanceof Error ? err.message : "Could not delete laptop."
+        );
+      } finally {
+        if (isMountedRef.current) setDeletingLaptop(false);
+      }
+    };
+
+    if (Platform.OS === "web") {
+      if (
+        typeof window !== "undefined" &&
+        window.confirm(
+          `Are you sure you want to remove "${laptopToDelete.name}"? This workstation will no longer be able to receive lock commands.`
+        )
+      ) {
+        void performDelete();
+      }
+    } else {
+      Alert.alert(
+        "Remove Laptop",
+        `Are you sure you want to remove "${laptopToDelete.name}"? This workstation will no longer be able to receive lock commands.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Remove",
+            style: "destructive",
+            onPress: () => void performDelete(),
+          },
+        ]
+      );
     }
   }
 
@@ -760,6 +909,77 @@ export default function HomeScreen() {
               </View>
             </Modal>
 
+            {/* Pairing Key Modal */}
+            <Modal
+              visible={isPairingModalVisible}
+              transparent
+              animationType="fade"
+              onRequestClose={() => setIsPairingModalVisible(false)}
+            >
+              <View style={styles.modalOverlay}>
+                <View style={styles.modalCard}>
+                  <View style={styles.modalHeader}>
+                    <Text style={styles.modalTitle}>WORKSTATION PAIRING KEY</Text>
+                    <TouchableOpacity
+                      onPress={() => setIsPairingModalVisible(false)}
+                    >
+                      <Text style={styles.modalCloseIcon}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={styles.modalSubtitle}>
+                    &quot;{pairedDeviceName}&quot; is registered! Paste this one-time pairing key into the Windows installer or save it to your agent config.
+                  </Text>
+
+                  <Text style={styles.fieldLabel}>ONE-TIME PAIRING KEY</Text>
+                  <View style={styles.pairingKeyBox}>
+                    <Text style={styles.pairingKeyText} numberOfLines={4} ellipsizeMode="middle" selectable>
+                      {pairingKey}
+                    </Text>
+                  </View>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.copyKeyBtn,
+                      copiedKey && styles.copyKeyBtnSuccess,
+                    ]}
+                    onPress={() => {
+                      if (Platform.OS === "web" && typeof navigator !== "undefined" && navigator.clipboard) {
+                        navigator.clipboard.writeText(pairingKey);
+                        setCopiedKey(true);
+                      } else {
+                        setCopiedKey(true);
+                      }
+                    }}
+                  >
+                    <Text style={styles.copyKeyBtnText}>
+                      {copiedKey ? "✓ Copied to Clipboard!" : "📋 Copy Pairing Key"}
+                    </Text>
+                  </TouchableOpacity>
+
+                  <View style={styles.pairingInstructionsBox}>
+                    <Text style={styles.pairingInstructionsHeader}>NEXT STEPS ON YOUR PC:</Text>
+                    <Text style={styles.pairingInstructionStep}>
+                      1. Run the Laptop Remote Lock Agent Windows installer.
+                    </Text>
+                    <Text style={styles.pairingInstructionStep}>
+                      2. When prompted, paste this Pairing Key.
+                    </Text>
+                    <Text style={styles.pairingInstructionStep}>
+                      3. The agent will connect automatically on Windows sign-in.
+                    </Text>
+                  </View>
+
+                  <TouchableOpacity
+                    style={styles.modalDoneBtn}
+                    onPress={() => setIsPairingModalVisible(false)}
+                  >
+                    <Text style={styles.modalDoneBtnText}>Done</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </Modal>
+
             {deviceLoading && !device ? (
               <ActivityIndicator size="small" color="#38bdf8" style={styles.verticalSpacer} />
             ) : device ? (
@@ -799,6 +1019,38 @@ export default function HomeScreen() {
                     <Text style={styles.specLabel}>POLL INTERVAL</Text>
                     <Text style={styles.specValue}>5s Cycle</Text>
                   </View>
+                </View>
+
+                {/* Workstation Action Row: View Pairing Key & Remove Laptop */}
+                <View style={styles.deviceActionRow}>
+                  {storedPairingKeys[device.id] ? (
+                    <TouchableOpacity
+                      style={styles.viewPairingKeyBtn}
+                      onPress={() => {
+                        setPairedDeviceName(device.name);
+                        setPairingKey(storedPairingKeys[device.id]);
+                        setCopiedKey(false);
+                        setIsPairingModalVisible(true);
+                      }}
+                    >
+                      <Text style={styles.viewPairingKeyBtnText}>🔑 View Pairing Key</Text>
+                    </TouchableOpacity>
+                  ) : null}
+
+                  <TouchableOpacity
+                    style={[
+                      styles.deleteDeviceBtn,
+                      deletingLaptop && styles.btnDisabled,
+                    ]}
+                    onPress={() => void handleDeleteLaptop(device)}
+                    disabled={deletingLaptop}
+                  >
+                    {deletingLaptop ? (
+                      <ActivityIndicator size="small" color="#f87171" />
+                    ) : (
+                      <Text style={styles.deleteDeviceBtnText}>🗑 Remove Workstation</Text>
+                    )}
+                  </TouchableOpacity>
                 </View>
               </>
             ) : (
@@ -1150,12 +1402,16 @@ export default function HomeScreen() {
             </TouchableOpacity>
           )}
 
+          {!!message && (
+            <View style={styles.authErrorBox}>
+              <Text style={styles.authErrorText}>⚠️ {message}</Text>
+            </View>
+          )}
+
           <Text style={styles.authHintText}>
             Protected by Supabase Auth with bcrypt hashing and encrypted sessions.
           </Text>
         </View>
-
-        {!!message && <Text style={styles.systemMessage}>{message}</Text>}
       </View>
     </ScrollView>
   );
@@ -1881,6 +2137,20 @@ const styles = StyleSheet.create({
     marginTop: 14,
     lineHeight: 14,
   },
+  authErrorBox: {
+    backgroundColor: "rgba(244, 63, 94, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(244, 63, 94, 0.35)",
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 14,
+  },
+  authErrorText: {
+    color: "#f87171",
+    fontSize: 12,
+    fontWeight: "600",
+    textAlign: "center",
+  },
   addLaptopHeaderBtn: {
     backgroundColor: "rgba(56, 189, 248, 0.12)",
     borderWidth: 1,
@@ -2044,5 +2314,107 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontSize: 13,
     fontWeight: "800",
+  },
+  pairingKeyBox: {
+    backgroundColor: "#030712",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.25)",
+    padding: 12,
+    marginBottom: 12,
+  },
+  pairingKeyText: {
+    fontSize: 11,
+    fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }),
+    color: "#38bdf8",
+    lineHeight: 16,
+  },
+  copyKeyBtn: {
+    backgroundColor: "rgba(56, 189, 248, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.35)",
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+    marginBottom: 14,
+  },
+  copyKeyBtnSuccess: {
+    backgroundColor: "rgba(52, 211, 153, 0.2)",
+    borderColor: "#10b981",
+  },
+  copyKeyBtnText: {
+    color: "#38bdf8",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  pairingInstructionsBox: {
+    backgroundColor: "rgba(255, 255, 255, 0.03)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.06)",
+    padding: 12,
+    marginBottom: 16,
+  },
+  pairingInstructionsHeader: {
+    fontSize: 9,
+    fontWeight: "800",
+    color: "#94a3b8",
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  pairingInstructionStep: {
+    fontSize: 11,
+    color: "#cbd5e1",
+    lineHeight: 16,
+    marginBottom: 2,
+  },
+  modalDoneBtn: {
+    backgroundColor: "#2563eb",
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  modalDoneBtnText: {
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  deviceActionRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 10,
+    width: "100%",
+  },
+  viewPairingKeyBtn: {
+    flex: 1,
+    backgroundColor: "rgba(56, 189, 248, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.25)",
+    borderRadius: 10,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  viewPairingKeyBtnText: {
+    color: "#38bdf8",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  deleteDeviceBtn: {
+    flex: 1,
+    backgroundColor: "rgba(244, 63, 94, 0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(244, 63, 94, 0.25)",
+    borderRadius: 10,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  deleteDeviceBtnText: {
+    color: "#f87171",
+    fontSize: 12,
+    fontWeight: "700",
   },
 });
