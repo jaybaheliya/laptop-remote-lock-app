@@ -1532,10 +1532,10 @@ export default function HomeScreen() {
                           <ActivityIndicator size="small" color="#ffffff" />
                         ) : (
                           <>
-                            <Text style={styles.powerActionEmoji}>{deviceHasPassword ? "🔓" : "☀️"}</Text>
-                            <Text style={styles.powerActionText}>{deviceHasPassword ? "UNLOCK" : "WAKE"}</Text>
-                            <Text style={styles.powerActionSub}>
-                              {deviceHasPassword ? "Auto-type password" : "Dismiss cover"}
+                            <Text style={styles.powerActionEmoji}>{deviceHasPassword ? "🔑" : "☀️"}</Text>
+                            <Text style={styles.powerActionText}>{deviceHasPassword ? "WAKE & UNLOCK" : "WAKE SCREEN"}</Text>
+                            <Text style={styles.powerActionSub} numberOfLines={1}>
+                              {deviceHasPassword ? "Auto-types password" : "Dismiss cover"}
                             </Text>
                           </>
                         )}
@@ -1592,7 +1592,7 @@ export default function HomeScreen() {
                 <View style={styles.screenshotCard}>
                   <View style={styles.screenshotHeader}>
                     <View style={styles.screenshotHeaderTitleRow}>
-                      <Text style={styles.screenshotCardTitle}>📸 DESKTOP SCREENSHOT</Text>
+                      <Text style={styles.screenshotCardTitle}>📸 SCREENSHOT</Text>
                       <View style={styles.liveIndicator}>
                         <View style={styles.liveIndicatorDot} />
                         <Text style={styles.liveIndicatorText}>ANTI-THEFT</Text>
@@ -2339,9 +2339,10 @@ const styles = StyleSheet.create({
   },
   powerActionText: {
     color: "#ffffff",
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: "800",
-    letterSpacing: 0.8,
+    letterSpacing: 0.5,
+    textAlign: "center",
   },
   powerActionSub: {
     color: "#94a3b8",
@@ -3090,33 +3091,40 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.07)",
-    padding: 14,
+    padding: 12,
     marginBottom: 16,
+    overflow: "hidden",
   },
   screenshotHeader: {
     flexDirection: "row",
+    flexWrap: "wrap",
     justifyContent: "space-between",
     alignItems: "center",
+    gap: 6,
     marginBottom: 12,
+    width: "100%",
   },
   screenshotHeaderTitleRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
+    flexShrink: 1,
   },
   screenshotCardTitle: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: "900",
     color: "#94a3b8",
-    letterSpacing: 1,
+    letterSpacing: 0.5,
   },
   refreshScreenshotBtn: {
     backgroundColor: "rgba(56, 189, 248, 0.15)",
     borderWidth: 1,
-    borderColor: "rgba(56, 189, 248, 0.3)",
+    borderColor: "rgba(56, 189, 248, 0.35)",
     borderRadius: 8,
-    paddingVertical: 5,
+    paddingVertical: 6,
     paddingHorizontal: 10,
+    flexShrink: 0,
+    alignSelf: "center",
   },
   refreshScreenshotBtnText: {
     fontSize: 11,

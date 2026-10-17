@@ -476,7 +476,8 @@ function captureScreen() {
 
 function getUnlockScriptPath() {
   const scriptPath = path.join(os.tmpdir(), "win_unlock_worker.ps1");
-  const scriptContent = `param([string]$PasswordBase64, [string]$Password)
+  const scriptContent = `param([string]$PasswordBase64 = "", [string]$Password = "")
+$ErrorActionPreference = "Stop"
 
 if (![string]::IsNullOrEmpty($PasswordBase64)) {
     try {
@@ -522,30 +523,39 @@ public class WinSendInputUnlocker {
     const uint KEYEVENTF_KEYUP = 0x0002;
     const uint KEYEVENTF_UNICODE = 0x0004;
 
-    public static void SendKey(ushort vk, bool isUnicode = false, char unicodeChar = '\0') {
+    public static void SendKey(ushort vk) {
         int inputSize = Marshal.SizeOf(typeof(INPUT));
         INPUT[] inputs = new INPUT[2];
 
         inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].ki.wVk = vk;
+        inputs[0].ki.wScan = (ushort)MapVirtualKey(vk, 0);
+        inputs[0].ki.dwFlags = 0;
+
         inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].ki.wVk = vk;
+        inputs[1].ki.wScan = inputs[0].ki.wScan;
+        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
 
-        if (isUnicode) {
-            inputs[0].ki.wVk = 0;
-            inputs[0].ki.wScan = (ushort)unicodeChar;
-            inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
+        SendInput(1, new INPUT[] { inputs[0] }, inputSize);
+        Thread.Sleep(50);
+        SendInput(1, new INPUT[] { inputs[1] }, inputSize);
+        Thread.Sleep(50);
+    }
 
-            inputs[1].ki.wVk = 0;
-            inputs[1].ki.wScan = (ushort)unicodeChar;
-            inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-        } else {
-            inputs[0].ki.wVk = vk;
-            inputs[0].ki.wScan = (ushort)MapVirtualKey(vk, 0);
-            inputs[0].ki.dwFlags = 0;
+    public static void SendUnicode(char c) {
+        int inputSize = Marshal.SizeOf(typeof(INPUT));
+        INPUT[] inputs = new INPUT[2];
 
-            inputs[1].ki.wVk = vk;
-            inputs[1].ki.wScan = inputs[0].ki.wScan;
-            inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-        }
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].ki.wVk = 0;
+        inputs[0].ki.wScan = (ushort)c;
+        inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
+
+        inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].ki.wVk = 0;
+        inputs[1].ki.wScan = (ushort)c;
+        inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
 
         SendInput(1, new INPUT[] { inputs[0] }, inputSize);
         Thread.Sleep(50);
@@ -556,7 +566,7 @@ public class WinSendInputUnlocker {
     public static void SendChar(char c) {
         short scanResult = VkKeyScan(c);
         if (scanResult == -1) {
-            SendKey(0, true, c);
+            SendUnicode(c);
             return;
         }
 
@@ -588,13 +598,12 @@ public class WinSendInputUnlocker {
 
     public static void Unlock(string password) {
         // Step 1: Wake display with slight mouse movement
-        mouse_event(0x0001, 15, 15, 0, 0);
+        mouse_event(0x0001, 20, 20, 0, 0);
         Thread.Sleep(60);
-        mouse_event(0x0001, -15, -15, 0, 0);
+        mouse_event(0x0001, -20, -20, 0, 0);
         Thread.Sleep(600);
 
         // Step 2: Dismiss lock screen clock curtain by sending Enter (VK_RETURN)
-        // Enter raises the curtain smoothly without typing invalid characters into the input box
         SendKey(0x0D);
         Thread.Sleep(1200);
 
@@ -602,7 +611,7 @@ public class WinSendInputUnlocker {
         if (!string.IsNullOrEmpty(password)) {
             foreach (char c in password) {
                 SendChar(c);
-                Thread.Sleep(60);
+                Thread.Sleep(70);
             }
             Thread.Sleep(300);
 
@@ -623,21 +632,27 @@ function unlockOrWakeWindows(unlockPassword) {
   return new Promise((resolve, reject) => {
     try {
       const scriptPath = getUnlockScriptPath();
-      const pwdArg = typeof unlockPassword === "string" ? unlockPassword : "";
-      const pwdBase64 = Buffer.from(pwdArg, "utf8").toString("base64");
+      const pwdArg = typeof unlockPassword === "string" ? unlockPassword.trim() : "";
+      const pwdBase64 = pwdArg ? Buffer.from(pwdArg, "utf8").toString("base64") : "";
 
-      const child = spawn(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-PasswordBase64", pwdBase64],
-        { shell: false, windowsHide: true }
-      );
+      const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath];
+      if (pwdBase64) {
+        args.push("-PasswordBase64", pwdBase64);
+      }
 
+      const child = spawn("powershell.exe", args, { shell: false, windowsHide: true });
+
+      let stdout = "";
       let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
       child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
       child.once("close", (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Wake/unlock command exited with code ${code}: ${stderr.trim()}`));
+        if (code === 0 && !stderr.includes("Error") && !stderr.includes("Exception")) {
+          resolve();
+        } else {
+          reject(new Error(`Wake/unlock command failed (exit ${code}): ${stderr.trim() || stdout.trim()}`));
+        }
       });
       child.once("error", reject);
     } catch (err) {
