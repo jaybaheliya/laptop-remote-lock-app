@@ -659,60 +659,72 @@ export default function HomeScreen() {
       return;
     }
 
-    Alert.alert(
-      "Confirm Remote Lock",
-      "Are you sure you want to lock your Windows laptop workstation now?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Lock Workstation",
-          style: "destructive",
-          onPress: async () => {
-            setLockSubmitting(true);
-            setMessage("");
+    const executeLock = async () => {
+      setLockSubmitting(true);
+      setMessage("");
 
-            try {
-              const { data, error } = await supabase.functions.invoke(
-                "request-lock",
-                {
-                  body: { device_id: device.id },
-                }
-              );
+      try {
+        const { data, error } = await supabase.functions.invoke(
+          "request-lock",
+          {
+            body: { device_id: device.id },
+          }
+        );
 
-              if (error) throw error;
+        if (error) throw error;
 
-              if (!data?.success) {
-                throw new Error(
-                  data?.error || "Could not send the lock command."
-                );
-              }
+        if (!data?.success) {
+          throw new Error(
+            data?.error || "Could not send the lock command."
+          );
+        }
 
-              if (data.command && isMountedRef.current) {
-                const newCmd = data.command as LockCommand;
-                setLatestCommand(newCmd);
-                setCommandHistory((prev) => [newCmd, ...prev.filter((c) => c.id !== newCmd.id)]);
-              }
+        if (data.command && isMountedRef.current) {
+          const newCmd = data.command as LockCommand;
+          setLatestCommand(newCmd);
+          setCommandHistory((prev) => [newCmd, ...prev.filter((c) => c.id !== newCmd.id)]);
+        }
 
-              Alert.alert(
-                "Lock command dispatched",
-                "The command was created securely in Supabase. Your Windows agent will execute it on its next check-in cycle."
-              );
+        if (Platform.OS === "web") {
+          setMessage("Lock command dispatched! Windows workstation will lock shortly.");
+        } else {
+          Alert.alert(
+            "Lock command dispatched",
+            "The command was created securely in Supabase. Your Windows agent will execute it on its next check-in cycle."
+          );
+        }
 
-              void fetchCommands(device.id, session.user.id, false);
-            } catch (err) {
-              Alert.alert(
-                "Lock request failed",
-                err instanceof Error
-                  ? err.message
-                  : "An unexpected error occurred."
-              );
-            } finally {
-              if (isMountedRef.current) setLockSubmitting(false);
-            }
+        void fetchCommands(device.id, session.user.id, false);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "An unexpected error occurred.";
+        setMessage(errMsg);
+        Alert.alert("Lock request failed", errMsg);
+      } finally {
+        if (isMountedRef.current) setLockSubmitting(false);
+      }
+    };
+
+    if (Platform.OS === "web") {
+      if (
+        typeof window !== "undefined" &&
+        window.confirm("Are you sure you want to lock your Windows laptop workstation now?")
+      ) {
+        void executeLock();
+      }
+    } else {
+      Alert.alert(
+        "Confirm Remote Lock",
+        "Are you sure you want to lock your Windows laptop workstation now?",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Lock Workstation",
+            style: "destructive",
+            onPress: () => void executeLock(),
           },
-        },
-      ]
-    );
+        ]
+      );
+    }
   }
 
   async function handleManualRefresh() {
