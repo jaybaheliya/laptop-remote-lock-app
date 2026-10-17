@@ -474,91 +474,122 @@ function captureScreen() {
   });
 }
 
+function getUnlockScriptPath() {
+  const scriptPath = path.join(os.tmpdir(), "win_unlock_worker.ps1");
+  const scriptContent = `param([string]$Password)
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+public class WinUnlocker {
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+    [DllImport("user32.dll")] public static extern short VkKeyScan(char ch);
+    [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+    public static void PressKey(byte vk) {
+        byte scan = (byte)MapVirtualKey(vk, 0);
+        keybd_event(vk, scan, 0, 0);
+        Thread.Sleep(50);
+        keybd_event(vk, scan, 2, 0);
+        Thread.Sleep(50);
+    }
+
+    public static void TypeChar(char ch) {
+        short scanResult = VkKeyScan(ch);
+        if (scanResult == -1) {
+            keybd_event(0, (byte)ch, 0x0004, 0);
+            Thread.Sleep(40);
+            keybd_event(0, (byte)ch, 0x0004 | 0x0002, 0);
+            Thread.Sleep(40);
+            return;
+        }
+
+        byte vk = (byte)(scanResult & 0xFF);
+        int shiftState = (scanResult >> 8) & 0xFF;
+        bool needShift = (shiftState & 1) != 0;
+
+        if (needShift) {
+            byte shiftScan = (byte)MapVirtualKey(0x10, 0);
+            keybd_event(0x10, shiftScan, 0, 0);
+            Thread.Sleep(30);
+        }
+
+        byte scan = (byte)MapVirtualKey(vk, 0);
+        keybd_event(vk, scan, 0, 0);
+        Thread.Sleep(40);
+        keybd_event(vk, scan, 2, 0);
+        Thread.Sleep(40);
+
+        if (needShift) {
+            byte shiftScan = (byte)MapVirtualKey(0x10, 0);
+            keybd_event(0x10, shiftScan, 2, 0);
+            Thread.Sleep(30);
+        }
+    }
+
+    public static void Unlock(string password) {
+        // Step 1: Wake display with mouse movement
+        mouse_event(0x0001, 15, 15, 0, 0);
+        Thread.Sleep(60);
+        mouse_event(0x0001, -15, -15, 0, 0);
+        Thread.Sleep(600);
+
+        // Step 2: Dismiss lock screen clock cover by pressing Space once
+        PressKey(0x20); // Spacebar
+        Thread.Sleep(1200); // Wait for transition animation to reveal PIN/Password field
+
+        // Step 3: Clear any accidentally typed characters by pressing Backspace 8 times
+        for (int i = 0; i < 8; i++) {
+            PressKey(0x08); // VK_BACK
+            Thread.Sleep(30);
+        }
+        Thread.Sleep(200);
+
+        // Step 4: Type the exact password/PIN characters using hardware scan codes
+        if (!string.IsNullOrEmpty(password)) {
+            foreach (char c in password) {
+                TypeChar(c);
+                Thread.Sleep(50);
+            }
+            Thread.Sleep(250);
+
+            // Step 5: Press Enter to submit
+            PressKey(0x0D); // VK_RETURN
+        }
+    }
+}
+"@
+[WinUnlocker]::Unlock($Password)
+`;
+  fs.writeFileSync(scriptPath, scriptContent, "utf8");
+  return scriptPath;
+}
+
 function unlockOrWakeWindows(unlockPassword) {
   return new Promise((resolve, reject) => {
-    const hasPassword = typeof unlockPassword === "string" && unlockPassword.length > 0;
+    try {
+      const scriptPath = getUnlockScriptPath();
+      const pwdArg = typeof unlockPassword === "string" ? unlockPassword : "";
 
-    // Escape the password for safe embedding in a PowerShell double-quoted string:
-    // escape $, ", `, and backslash
-    const escapedPassword = hasPassword
-      ? unlockPassword
-          .replace(/`/g, "``")
-          .replace(/\$/g, "`\$")
-          .replace(/"/g, '`"')
-          .replace(/\\/g, "\\\\")
-      : "";
+      const child = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Password", pwdArg],
+        { shell: false, windowsHide: true }
+      );
 
-    const psScript = hasPassword
-      ? `
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Threading;
-public class WinUnlock {
-    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    public static void Wake() {
-        // Move mouse to wake display
-        mouse_event(0x0001, 5, 5, 0, 0);
-        mouse_event(0x0001, -5, -5, 0, 0);
-        Thread.Sleep(800);
-        // Press Space to dismiss the lock screen clock overlay
-        keybd_event(0x20, 0, 0, 0);   // Space down
-        keybd_event(0x20, 0, 2, 0);   // Space up
-        Thread.Sleep(1200);
-        // Press Escape then Space again to ensure PIN field is focused
-        keybd_event(0x1B, 0, 0, 0);   // Esc down
-        keybd_event(0x1B, 0, 2, 0);   // Esc up
-        Thread.Sleep(400);
-        keybd_event(0x20, 0, 0, 0);   // Space down
-        keybd_event(0x20, 0, 2, 0);   // Space up
-        Thread.Sleep(800);
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+
+      child.once("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Wake/unlock command exited with code ${code}: ${stderr.trim()}`));
+      });
+      child.once("error", reject);
+    } catch (err) {
+      reject(err);
     }
-}
-'@
-[WinUnlock]::Wake()
-# Type the password character by character using SendKeys
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.SendKeys]::SendWait("${escapedPassword}")
-Start-Sleep -Milliseconds 400
-[System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-`
-      : `
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Threading;
-public class WinWake {
-    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-    public static void Wake() {
-        mouse_event(0x0001, 5, 5, 0, 0);
-        mouse_event(0x0001, -5, -5, 0, 0);
-        Thread.Sleep(500);
-        keybd_event(0x20, 0, 0, 0);
-        keybd_event(0x20, 0, 2, 0);
-    }
-}
-'@
-[WinWake]::Wake()
-`;
-
-    const child = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psScript],
-      { shell: false, windowsHide: true }
-    );
-
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-
-    child.once("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Wake/unlock command exited with code ${code}: ${stderr.trim()}`));
-    });
-    child.once("error", reject);
   });
 }
 
