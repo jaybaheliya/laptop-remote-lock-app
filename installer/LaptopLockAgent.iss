@@ -82,13 +82,15 @@ begin
     ConfigPath := ConfigDir + '\config.json';
     ForceDirectories(ConfigDir);
 
+    // Terminate any running agent instance so it releases PID lock and reloads new config
+    Exec('taskkill.exe', '/F /IM node.exe /FI "WINDOWTITLE eq LaptopLockAgent*"', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
+    Exec('schtasks.exe', '/End /TN "LaptopLockAgent"', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
+
     PairKeyRaw := Trim(PairingPage.Values[0]);
     
     // Save configuration JSON into user local app data
     if Length(PairKeyRaw) > 0 then
     begin
-      // If user inputs raw JSON or Base64, write config safely
-      // In production, decoding base64 string directly into config.json
       SaveStringToFile(ConfigPath, PairKeyRaw, False);
     end;
 
