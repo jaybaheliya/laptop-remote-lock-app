@@ -476,33 +476,87 @@ function captureScreen() {
 
 function getUnlockScriptPath() {
   const scriptPath = path.join(os.tmpdir(), "win_unlock_worker.ps1");
-  const scriptContent = `param([string]$Password)
+  const scriptContent = `param([string]$PasswordBase64, [string]$Password)
+
+if (![string]::IsNullOrEmpty($PasswordBase64)) {
+    try {
+        $bytes = [System.Convert]::FromBase64String($PasswordBase64)
+        $Password = [System.Text.Encoding]::UTF8.GetString($bytes)
+    } catch {}
+}
+
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-public class WinUnlocker {
-    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-    [DllImport("user32.dll")] public static extern short VkKeyScan(char ch);
-    [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+public class WinSendInputUnlocker {
+    [StructLayout(LayoutKind.Sequential)]
+    struct KEYBDINPUT {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
 
-    public static void PressKey(byte vk) {
-        byte scan = (byte)MapVirtualKey(vk, 0);
-        keybd_event(vk, scan, 0, 0);
+    [StructLayout(LayoutKind.Explicit)]
+    struct INPUT {
+        [FieldOffset(0)] public uint type;
+        [FieldOffset(8)] public KEYBDINPUT ki;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    [DllImport("user32.dll")]
+    static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+    [DllImport("user32.dll")]
+    static extern short VkKeyScan(char ch);
+
+    const uint INPUT_KEYBOARD = 1;
+    const uint KEYEVENTF_KEYUP = 0x0002;
+    const uint KEYEVENTF_UNICODE = 0x0004;
+
+    public static void SendKey(ushort vk, bool isUnicode = false, char unicodeChar = '\0') {
+        int inputSize = Marshal.SizeOf(typeof(INPUT));
+        INPUT[] inputs = new INPUT[2];
+
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[1].type = INPUT_KEYBOARD;
+
+        if (isUnicode) {
+            inputs[0].ki.wVk = 0;
+            inputs[0].ki.wScan = (ushort)unicodeChar;
+            inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
+
+            inputs[1].ki.wVk = 0;
+            inputs[1].ki.wScan = (ushort)unicodeChar;
+            inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        } else {
+            inputs[0].ki.wVk = vk;
+            inputs[0].ki.wScan = (ushort)MapVirtualKey(vk, 0);
+            inputs[0].ki.dwFlags = 0;
+
+            inputs[1].ki.wVk = vk;
+            inputs[1].ki.wScan = inputs[0].ki.wScan;
+            inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        }
+
+        SendInput(1, new INPUT[] { inputs[0] }, inputSize);
         Thread.Sleep(50);
-        keybd_event(vk, scan, 2, 0);
+        SendInput(1, new INPUT[] { inputs[1] }, inputSize);
         Thread.Sleep(50);
     }
 
-    public static void TypeChar(char ch) {
-        short scanResult = VkKeyScan(ch);
+    public static void SendChar(char c) {
+        short scanResult = VkKeyScan(c);
         if (scanResult == -1) {
-            keybd_event(0, (byte)ch, 0x0004, 0);
-            Thread.Sleep(40);
-            keybd_event(0, (byte)ch, 0x0004 | 0x0002, 0);
-            Thread.Sleep(40);
+            SendKey(0, true, c);
             return;
         }
 
@@ -511,57 +565,55 @@ public class WinUnlocker {
         bool needShift = (shiftState & 1) != 0;
 
         if (needShift) {
-            byte shiftScan = (byte)MapVirtualKey(0x10, 0);
-            keybd_event(0x10, shiftScan, 0, 0);
+            INPUT shiftDown = new INPUT();
+            shiftDown.type = INPUT_KEYBOARD;
+            shiftDown.ki.wVk = 0x10;
+            shiftDown.ki.wScan = (ushort)MapVirtualKey(0x10, 0);
+            SendInput(1, new INPUT[] { shiftDown }, Marshal.SizeOf(typeof(INPUT)));
             Thread.Sleep(30);
         }
 
-        byte scan = (byte)MapVirtualKey(vk, 0);
-        keybd_event(vk, scan, 0, 0);
-        Thread.Sleep(40);
-        keybd_event(vk, scan, 2, 0);
-        Thread.Sleep(40);
+        SendKey(vk);
 
         if (needShift) {
-            byte shiftScan = (byte)MapVirtualKey(0x10, 0);
-            keybd_event(0x10, shiftScan, 2, 0);
+            INPUT shiftUp = new INPUT();
+            shiftUp.type = INPUT_KEYBOARD;
+            shiftUp.ki.wVk = 0x10;
+            shiftUp.ki.wScan = (ushort)MapVirtualKey(0x10, 0);
+            shiftUp.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, new INPUT[] { shiftUp }, Marshal.SizeOf(typeof(INPUT)));
             Thread.Sleep(30);
         }
     }
 
     public static void Unlock(string password) {
-        // Step 1: Wake display with mouse movement
+        // Step 1: Wake display with slight mouse movement
         mouse_event(0x0001, 15, 15, 0, 0);
         Thread.Sleep(60);
         mouse_event(0x0001, -15, -15, 0, 0);
         Thread.Sleep(600);
 
-        // Step 2: Dismiss lock screen clock cover by pressing Space once
-        PressKey(0x20); // Spacebar
-        Thread.Sleep(1200); // Wait for transition animation to reveal PIN/Password field
+        // Step 2: Dismiss lock screen clock curtain by sending Enter (VK_RETURN)
+        // Enter raises the curtain smoothly without typing invalid characters into the input box
+        SendKey(0x0D);
+        Thread.Sleep(1200);
 
-        // Step 3: Clear any accidentally typed characters by pressing Backspace 8 times
-        for (int i = 0; i < 8; i++) {
-            PressKey(0x08); // VK_BACK
-            Thread.Sleep(30);
-        }
-        Thread.Sleep(200);
-
-        // Step 4: Type the exact password/PIN characters using hardware scan codes
+        // Step 3: Type password characters (do NOT send backspaces)
         if (!string.IsNullOrEmpty(password)) {
             foreach (char c in password) {
-                TypeChar(c);
-                Thread.Sleep(50);
+                SendChar(c);
+                Thread.Sleep(60);
             }
-            Thread.Sleep(250);
+            Thread.Sleep(300);
 
-            // Step 5: Press Enter to submit
-            PressKey(0x0D); // VK_RETURN
+            // Step 4: Submit password
+            SendKey(0x0D);
         }
     }
 }
 "@
-[WinUnlocker]::Unlock($Password)
+
+[WinSendInputUnlocker]::Unlock($Password)
 `;
   fs.writeFileSync(scriptPath, scriptContent, "utf8");
   return scriptPath;
@@ -572,10 +624,11 @@ function unlockOrWakeWindows(unlockPassword) {
     try {
       const scriptPath = getUnlockScriptPath();
       const pwdArg = typeof unlockPassword === "string" ? unlockPassword : "";
+      const pwdBase64 = Buffer.from(pwdArg, "utf8").toString("base64");
 
       const child = spawn(
         "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Password", pwdArg],
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-PasswordBase64", pwdBase64],
         { shell: false, windowsHide: true }
       );
 
