@@ -44,3 +44,4 @@ CREATE POLICY "Create remote commands for own devices"
         AND d.user_id = auth.uid()
     )
   );
+

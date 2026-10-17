@@ -39,3 +39,4 @@ public class Win32Capture {
 "@ -ReferencedAssemblies System.Drawing
 
 [Win32Capture]::SaveScreen($OutputPath)
+
