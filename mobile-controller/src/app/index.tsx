@@ -5,12 +5,14 @@ import {
   Modal,
   Platform,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
 
 type Device = {
@@ -751,14 +753,17 @@ export default function HomeScreen() {
   // Signed-in Dashboard
   if (session) {
     return (
-      <ScrollView
-        style={styles.screenBackground}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-      >
-        <View style={styles.consoleContainer}>
-          {/* Top Security Header */}
-          <View style={styles.topBar}>
+      <SafeAreaView style={styles.safeAreaContainer} edges={["top", "left", "right", "bottom"]}>
+        <StatusBar barStyle="light-content" backgroundColor="#090d16" />
+        <ScrollView
+          style={styles.screenBackground}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.consoleContainer}>
+            {/* Top Security Header */}
+            <View style={styles.topBar}>
             <View style={styles.brandRow}>
               <View style={styles.shieldBadge}>
                 <Text style={styles.shieldIcon}>🛡️</Text>
@@ -1309,15 +1314,19 @@ export default function HomeScreen() {
           </View>
         </View>
       </ScrollView>
-    );
-  }
+    </SafeAreaView>
+  );
+}
 
-  // Signed-out Authentication Screen
-  return (
+// Signed-out Authentication Screen
+return (
+  <SafeAreaView style={styles.safeAreaContainer} edges={["top", "left", "right", "bottom"]}>
+    <StatusBar barStyle="light-content" backgroundColor="#090d16" />
     <ScrollView
       style={styles.screenBackground}
       contentContainerStyle={styles.scrollContent}
       keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
     >
       <View style={styles.consoleContainer}>
         {/* Auth Brand Header */}
@@ -1426,19 +1435,24 @@ export default function HomeScreen() {
         </View>
       </View>
     </ScrollView>
+  </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeAreaContainer: {
+    flex: 1,
+    backgroundColor: "#090d16",
+  },
   screenBackground: {
     flex: 1,
     backgroundColor: "#090d16",
   },
   scrollContent: {
     flexGrow: 1,
-    justifyContent: "center",
     alignItems: "center",
-    paddingVertical: 28,
+    paddingTop: Platform.select({ ios: 10, android: 16, default: 24 }),
+    paddingBottom: 50,
     paddingHorizontal: 16,
   },
   consoleContainer: {
@@ -1452,7 +1466,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 16,
-    paddingHorizontal: 4,
+    paddingHorizontal: 2,
   },
   brandRow: {
     flexDirection: "row",
