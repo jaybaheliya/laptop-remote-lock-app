@@ -70,6 +70,7 @@ Deno.serve(async (req: Request) => {
     command_id?: string;
     status?: string;
     failure_reason?: string;
+    image_data?: string;
     battery?: {
       level?: number;
       is_charging?: boolean;
@@ -182,7 +183,7 @@ Deno.serve(async (req: Request) => {
         .select("id, device_id, action, status, created_at")
         .eq("device_id", deviceId)
         .eq("user_id", userId)
-        .in("action", ["lock", "sleep", "shutdown"])
+        .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock"])
         .eq("status", "pending")
         .order("created_at", { ascending: true })
         .limit(1)
@@ -264,6 +265,25 @@ Deno.serve(async (req: Request) => {
         { error: "Command not found or no longer claimable" },
         404
       );
+    }
+
+    // If this was a screenshot command and returned image_data, persist to screenshots table
+    if (
+      body.status === "completed" &&
+      typeof body.image_data === "string" &&
+      body.image_data.length > 50
+    ) {
+      const { error: ssError } = await admin
+        .from("screenshots")
+        .insert({
+          device_id: deviceId,
+          user_id: userId,
+          image_data: body.image_data,
+        });
+
+      if (ssError) {
+        console.error("Screenshot persistence failed:", ssError.message);
+      }
     }
 
     return jsonResponse({ success: true, command: updated });

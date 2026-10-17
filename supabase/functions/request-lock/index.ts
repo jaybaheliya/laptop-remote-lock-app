@@ -73,7 +73,7 @@ Deno.serve(async (req: Request) => {
   const deviceId = body?.device_id;
   const requestedAction = typeof body?.action === "string" ? body.action.trim().toLowerCase() : "lock";
 
-  const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown"];
+  const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock"];
   if (!ALLOWED_ACTIONS.includes(requestedAction)) {
     return jsonResponse({ error: `Invalid action. Allowed: ${ALLOWED_ACTIONS.join(", ")}` }, 400);
   }

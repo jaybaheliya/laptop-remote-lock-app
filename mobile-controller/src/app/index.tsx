@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Modal,
   Platform,
   ScrollView,
@@ -31,6 +32,13 @@ type LockCommand = {
   status: "pending" | "claimed" | "completed" | "failed" | string;
   created_at: string;
   failure_reason?: string | null;
+};
+
+type ScreenshotItem = {
+  id: string;
+  device_id: string;
+  image_data: string;
+  created_at: string;
 };
 
 const HEARTBEAT_FRESHNESS_MS = 20000; // 20 seconds freshness window
@@ -65,8 +73,12 @@ export default function HomeScreen() {
   const [latestCommand, setLatestCommand] = useState<LockCommand | null>(null);
   const [commandHistory, setCommandHistory] = useState<LockCommand[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [actionSubmitting, setActionSubmitting] = useState<"lock" | "sleep" | "shutdown" | null>(null);
+  const [actionSubmitting, setActionSubmitting] = useState<
+    "lock" | "sleep" | "shutdown" | "screenshot" | "unlock" | null
+  >(null);
   const lockSubmitting = actionSubmitting !== null;
+  const [latestScreenshot, setLatestScreenshot] = useState<ScreenshotItem | null>(null);
+  const [screenshotModalVisible, setScreenshotModalVisible] = useState(false);
   const [statusError, setStatusError] = useState("");
 
   // Track time in state to comply with React 19 purity rules
@@ -187,7 +199,7 @@ export default function HomeScreen() {
           .select("id, action, status, created_at, failure_reason")
           .eq("device_id", deviceId)
           .eq("user_id", userId)
-          .in("action", ["lock", "sleep", "shutdown"])
+          .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock"])
           .order("created_at", { ascending: false })
           .limit(10);
 
@@ -201,7 +213,7 @@ export default function HomeScreen() {
             .select("id, action, status, created_at")
             .eq("device_id", deviceId)
             .eq("user_id", userId)
-            .in("action", ["lock", "sleep", "shutdown"])
+            .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock"])
             .order("created_at", { ascending: false })
             .limit(10);
 
@@ -234,6 +246,25 @@ export default function HomeScreen() {
     []
   );
 
+  const fetchScreenshot = useCallback(async (deviceId: string, userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from("screenshots")
+        .select("id, device_id, image_data, created_at")
+        .eq("device_id", deviceId)
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!error && data && isMountedRef.current) {
+        setLatestScreenshot(data as ScreenshotItem);
+      }
+    } catch {
+      // Ignore background fetch error
+    }
+  }, []);
+
   // Initial load when user signs in
   useEffect(() => {
     const userId = session?.user?.id;
@@ -244,15 +275,16 @@ export default function HomeScreen() {
       if (!isSubscribed) return;
       if (loadedDev?.id) {
         void fetchCommands(loadedDev.id, userId, true);
+        void fetchScreenshot(loadedDev.id, userId);
       }
     });
 
     return () => {
       isSubscribed = false;
     };
-  }, [session?.user?.id, fetchDevice, fetchCommands]);
+  }, [session?.user?.id, fetchDevice, fetchCommands, fetchScreenshot]);
 
-  // Coordinated polling loop: single timer runs heartbeat + commands together
+  // Coordinated polling loop: single timer runs heartbeat + commands + screenshot together
   useEffect(() => {
     if (!session?.user?.id || !device?.id) return;
 
@@ -267,6 +299,7 @@ export default function HomeScreen() {
         await Promise.all([
           fetchDevice(userId, false),
           fetchCommands(deviceId, userId, false),
+          fetchScreenshot(deviceId, userId),
         ]);
       } finally {
         isPollingBusyRef.current = false;
@@ -278,7 +311,7 @@ export default function HomeScreen() {
     }, POLL_INTERVAL_MS);
 
     return () => clearInterval(intervalId);
-  }, [session?.user?.id, device?.id, fetchDevice, fetchCommands]);
+  }, [session?.user?.id, device?.id, fetchDevice, fetchCommands, fetchScreenshot]);
 
   // Heartbeat calculation helper
   const getHeartbeatState = () => {
@@ -648,7 +681,9 @@ export default function HomeScreen() {
     }
   }
 
-  async function executeRemoteAction(action: "lock" | "sleep" | "shutdown") {
+  async function executeRemoteAction(
+    action: "lock" | "sleep" | "shutdown" | "screenshot" | "unlock"
+  ) {
     if (!session?.access_token || !device?.id) {
       Alert.alert(
         "Unable to execute command",
@@ -694,6 +729,8 @@ export default function HomeScreen() {
         lock: "Lock command dispatched! Windows workstation will lock shortly.",
         sleep: "Sleep command dispatched! Windows workstation is entering sleep mode.",
         shutdown: "Shutdown command dispatched! Windows workstation will shut down in 10 seconds.",
+        screenshot: "Screenshot command dispatched! Windows agent is capturing your desktop...",
+        unlock: "Wake command dispatched! Screen is waking and dismissing lock wallpaper.",
       };
 
       const msg = actionSuccessMsg[action] || `${action} dispatched!`;
@@ -703,6 +740,14 @@ export default function HomeScreen() {
       }
 
       void fetchCommands(device.id, session.user.id, false);
+
+      if (action === "screenshot") {
+        setTimeout(() => {
+          if (isMountedRef.current) {
+            void fetchScreenshot(device.id, session.user.id);
+          }
+        }, 3500);
+      }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : "An unexpected error occurred.";
       setMessage(errMsg);
@@ -793,6 +838,7 @@ export default function HomeScreen() {
     await Promise.all([
       fetchDevice(session.user.id, true),
       fetchCommands(device.id, session.user.id, true),
+      fetchScreenshot(device.id, session.user.id),
     ]);
   }
 
@@ -1056,6 +1102,39 @@ export default function HomeScreen() {
               </View>
             </Modal>
 
+            {/* Fullscreen Screenshot Modal */}
+            <Modal
+              visible={screenshotModalVisible}
+              transparent
+              animationType="fade"
+              onRequestClose={() => setScreenshotModalVisible(false)}
+            >
+              <View style={styles.fullscreenModalOverlay}>
+                <View style={styles.fullscreenModalHeader}>
+                  <Text style={styles.fullscreenModalTitle}>📸 FULL DESKTOP SNAPSHOT</Text>
+                  <TouchableOpacity
+                    onPress={() => setScreenshotModalVisible(false)}
+                    style={styles.fullscreenCloseBtn}
+                  >
+                    <Text style={styles.fullscreenCloseBtnText}>✕ Close</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {latestScreenshot && (
+                  <View style={styles.fullscreenImageContainer}>
+                    <Image
+                      source={{ uri: latestScreenshot.image_data }}
+                      style={styles.fullscreenImage}
+                      resizeMode="contain"
+                    />
+                    <Text style={styles.fullscreenCaption}>
+                      Captured: {formatTimestamp(latestScreenshot.created_at)}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </Modal>
+
             {deviceLoading && !device ? (
               <ActivityIndicator size="small" color="#38bdf8" style={styles.verticalSpacer} />
             ) : device ? (
@@ -1217,8 +1296,8 @@ export default function HomeScreen() {
                     )}
                   </TouchableOpacity>
 
-                  {/* Secondary Power Actions: Sleep & Shutdown */}
-                  <View style={styles.powerActionsRow}>
+                  {/* Secondary Power Actions: Sleep, Shutdown, Screenshot, Wake/Unlock */}
+                  <View style={styles.powerActionsGrid}>
                     <TouchableOpacity
                       style={[
                         styles.powerActionBtn,
@@ -1236,7 +1315,7 @@ export default function HomeScreen() {
                         <>
                           <Text style={styles.powerActionEmoji}>🌙</Text>
                           <Text style={styles.powerActionText}>SLEEP</Text>
-                          <Text style={styles.powerActionSub}>Low-power standby</Text>
+                          <Text style={styles.powerActionSub}>Low-power</Text>
                         </>
                       )}
                     </TouchableOpacity>
@@ -1258,7 +1337,51 @@ export default function HomeScreen() {
                         <>
                           <Text style={styles.powerActionEmoji}>⚡</Text>
                           <Text style={styles.powerActionText}>SHUT DOWN</Text>
-                          <Text style={styles.powerActionSub}>Power off machine</Text>
+                          <Text style={styles.powerActionSub}>Power off</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.powerActionBtn,
+                        styles.screenshotBtn,
+                        (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
+                          styles.heroLockBtnDisabled,
+                      ]}
+                      onPress={() => void executeRemoteAction("screenshot")}
+                      disabled={actionSubmitting !== null || isCommandActive}
+                      activeOpacity={0.8}
+                    >
+                      {actionSubmitting === "screenshot" ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <>
+                          <Text style={styles.powerActionEmoji}>📸</Text>
+                          <Text style={styles.powerActionText}>SNAPSHOT</Text>
+                          <Text style={styles.powerActionSub}>Screen</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.powerActionBtn,
+                        styles.unlockBtn,
+                        (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
+                          styles.heroLockBtnDisabled,
+                      ]}
+                      onPress={() => void executeRemoteAction("unlock")}
+                      disabled={actionSubmitting !== null || isCommandActive}
+                      activeOpacity={0.8}
+                    >
+                      {actionSubmitting === "unlock" ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <>
+                          <Text style={styles.powerActionEmoji}>🔓</Text>
+                          <Text style={styles.powerActionText}>WAKE</Text>
+                          <Text style={styles.powerActionSub}>Dismiss lock</Text>
                         </>
                       )}
                     </TouchableOpacity>
@@ -1276,6 +1399,58 @@ export default function HomeScreen() {
                     <Text style={styles.offlineWarningText}>
                       Notice: Agent is currently offline. Commands will queue in pending state until agent resumes.
                     </Text>
+                  )}
+                </View>
+
+                {/* DESKTOP SCREEN MONITOR CARD */}
+                <View style={styles.screenshotCard}>
+                  <View style={styles.screenshotHeader}>
+                    <View style={styles.screenshotHeaderTitleRow}>
+                      <Text style={styles.screenshotCardTitle}>📸 LIVE DESKTOP SCREENSHOT</Text>
+                      <View style={styles.liveIndicator}>
+                        <View style={styles.liveIndicatorDot} />
+                        <Text style={styles.liveIndicatorText}>ANTI-THEFT</Text>
+                      </View>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.refreshScreenshotBtn}
+                      onPress={() => void executeRemoteAction("screenshot")}
+                      disabled={actionSubmitting !== null || isCommandActive}
+                    >
+                      <Text style={styles.refreshScreenshotBtnText}>
+                        {actionSubmitting === "screenshot" ? "Capturing..." : "🔄 Capture Now"}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {latestScreenshot ? (
+                    <View style={styles.screenshotPreviewContainer}>
+                      <TouchableOpacity
+                        onPress={() => setScreenshotModalVisible(true)}
+                        activeOpacity={0.9}
+                        style={styles.screenshotImageWrapper}
+                      >
+                        <Image
+                          source={{ uri: latestScreenshot.image_data }}
+                          style={styles.screenshotImage}
+                          resizeMode="contain"
+                        />
+                        <View style={styles.screenshotOverlayPill}>
+                          <Text style={styles.screenshotOverlayPillText}>🔍 Tap to View Fullscreen</Text>
+                        </View>
+                      </TouchableOpacity>
+                      <Text style={styles.screenshotTimestamp}>
+                        Captured: {formatTimestamp(latestScreenshot.created_at)}
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={styles.noScreenshotBox}>
+                      <Text style={styles.noScreenshotEmoji}>🖥️</Text>
+                      <Text style={styles.noScreenshotText}>No desktop snapshot captured yet.</Text>
+                      <Text style={styles.noScreenshotSub}>
+                        Tap &quot;Capture Now&quot; to view what is currently on your laptop screen.
+                      </Text>
+                    </View>
                   )}
                 </View>
 
@@ -1927,14 +2102,16 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontWeight: "500",
   },
-  powerActionsRow: {
+  powerActionsGrid: {
     flexDirection: "row",
-    gap: 10,
+    flexWrap: "wrap",
+    gap: 8,
     width: "100%",
     marginTop: 12,
   },
   powerActionBtn: {
     flex: 1,
+    minWidth: "22%",
     borderRadius: 12,
     paddingVertical: 12,
     paddingHorizontal: 8,
@@ -1954,6 +2131,14 @@ const styles = StyleSheet.create({
   shutdownBtn: {
     backgroundColor: "rgba(239, 68, 68, 0.12)",
     borderColor: "rgba(239, 68, 68, 0.3)",
+  },
+  screenshotBtn: {
+    backgroundColor: "rgba(16, 185, 129, 0.15)",
+    borderColor: "rgba(16, 185, 129, 0.35)",
+  },
+  unlockBtn: {
+    backgroundColor: "rgba(245, 158, 11, 0.15)",
+    borderColor: "rgba(245, 158, 11, 0.35)",
   },
   powerActionEmoji: {
     fontSize: 20,
@@ -2705,5 +2890,164 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     letterSpacing: 0.3,
+  },
+  screenshotCard: {
+    width: "100%",
+    backgroundColor: "#161f30",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.07)",
+    padding: 14,
+    marginBottom: 16,
+  },
+  screenshotHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  screenshotHeaderTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  screenshotCardTitle: {
+    fontSize: 10,
+    fontWeight: "900",
+    color: "#94a3b8",
+    letterSpacing: 1,
+  },
+  refreshScreenshotBtn: {
+    backgroundColor: "rgba(56, 189, 248, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.3)",
+    borderRadius: 8,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+  },
+  refreshScreenshotBtnText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#38bdf8",
+  },
+  screenshotPreviewContainer: {
+    width: "100%",
+    alignItems: "center",
+  },
+  screenshotImageWrapper: {
+    width: "100%",
+    height: 190,
+    backgroundColor: "#0b0f19",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.1)",
+    overflow: "hidden",
+    position: "relative",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  screenshotImage: {
+    width: "100%",
+    height: "100%",
+  },
+  screenshotOverlayPill: {
+    position: "absolute",
+    bottom: 8,
+    right: 8,
+    backgroundColor: "rgba(0, 0, 0, 0.75)",
+    borderRadius: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.15)",
+  },
+  screenshotOverlayPillText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#f8fafc",
+  },
+  screenshotTimestamp: {
+    fontSize: 10,
+    color: "#64748b",
+    marginTop: 8,
+  },
+  noScreenshotBox: {
+    width: "100%",
+    paddingVertical: 24,
+    paddingHorizontal: 16,
+    backgroundColor: "rgba(0, 0, 0, 0.2)",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.05)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  noScreenshotEmoji: {
+    fontSize: 28,
+    marginBottom: 6,
+  },
+  noScreenshotText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#cbd5e1",
+    textAlign: "center",
+  },
+  noScreenshotSub: {
+    fontSize: 11,
+    color: "#64748b",
+    textAlign: "center",
+    marginTop: 4,
+  },
+  fullscreenModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(3, 7, 18, 0.95)",
+    padding: 16,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  fullscreenModalHeader: {
+    width: "100%",
+    maxWidth: 900,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+    paddingHorizontal: 4,
+  },
+  fullscreenModalTitle: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#f8fafc",
+    letterSpacing: 1,
+  },
+  fullscreenCloseBtn: {
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.15)",
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+  },
+  fullscreenCloseBtnText: {
+    color: "#f8fafc",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  fullscreenImageContainer: {
+    width: "100%",
+    maxWidth: 900,
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  fullscreenImage: {
+    width: "100%",
+    height: "90%",
+  },
+  fullscreenCaption: {
+    fontSize: 11,
+    color: "#94a3b8",
+    marginTop: 8,
+    textAlign: "center",
   },
 });

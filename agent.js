@@ -384,7 +384,120 @@ function shutdownWindows() {
   });
 }
 
-const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown"];
+function captureScreen() {
+  return new Promise((resolve, reject) => {
+    const psScript = `
+      Add-Type -ReferencedAssemblies System.Drawing, System.Windows.Forms -TypeDefinition @'
+      using System;
+      using System.Drawing;
+      using System.Drawing.Imaging;
+      using System.Runtime.InteropServices;
+      using System.Windows.Forms;
+
+      public class NativeCapture {
+          [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
+          [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+          [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+          [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr hDC);
+          [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr hDC, int nWidth, int nHeight);
+          [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+          [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr hObject);
+          [DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr hObject, int nXDest, int nYDest, int nWidth, int nHeight, IntPtr hObjectSource, int nXSrc, int nYSrc, int dwRop);
+
+          public static string Capture(string path) {
+              int w = Screen.PrimaryScreen.Bounds.Width;
+              int h = Screen.PrimaryScreen.Bounds.Height;
+              IntPtr hDeskDC = GetDC(IntPtr.Zero);
+              IntPtr hMemDC = CreateCompatibleDC(hDeskDC);
+              IntPtr hBmp = CreateCompatibleBitmap(hDeskDC, w, h);
+              IntPtr hOld = SelectObject(hMemDC, hBmp);
+              BitBlt(hMemDC, 0, 0, w, h, hDeskDC, 0, 0, 0x00CC0020);
+              Bitmap bmp = Image.FromHbitmap(hBmp);
+              bmp.Save(path, ImageFormat.Jpeg);
+              bmp.Dispose();
+              SelectObject(hMemDC, hOld);
+              DeleteObject(hBmp);
+              DeleteDC(hMemDC);
+              ReleaseDC(IntPtr.Zero, hDeskDC);
+              return path;
+          }
+      }
+'@
+      $tmp = Join-Path $env:TEMP ("capture_" + [System.Guid]::NewGuid().ToString() + ".jpg")
+      [NativeCapture]::Capture($tmp)
+      Write-Output $tmp
+    `;
+
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psScript],
+      { shell: false, windowsHide: true }
+    );
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+
+    child.once("close", (code) => {
+      const filePath = stdout.trim();
+      if (code === 0 && filePath && fs.existsSync(filePath)) {
+        try {
+          const imgBuffer = fs.readFileSync(filePath);
+          const base64Data = "data:image/jpeg;base64," + imgBuffer.toString("base64");
+          try { fs.unlinkSync(filePath); } catch {}
+          resolve(base64Data);
+          return;
+        } catch (readErr) {
+          reject(new Error("Could not read screenshot file: " + readErr.message));
+          return;
+        }
+      }
+      reject(new Error(`Screenshot capture failed (code ${code}): ${stderr.trim() || "Unknown error"}`));
+    });
+
+    child.once("error", (err) => {
+      reject(new Error(`Screenshot process spawn failed: ${err.message}`));
+    });
+  });
+}
+
+function unlockOrWakeWindows() {
+  return new Promise((resolve, reject) => {
+    // Wakes display, simulates mouse movement and keypress to dismiss lock screensaver
+    const psScript = `
+      Add-Type -TypeDefinition @'
+      using System;
+      using System.Runtime.InteropServices;
+      public class DisplayWake {
+          [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
+          [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+          public static void Wake() {
+              mouse_event(0x0001, 1, 1, 0, 0);
+              mouse_event(0x0001, -1, -1, 0, 0);
+              keybd_event(0x20, 0, 0, 0);
+              keybd_event(0x20, 0, 2, 0);
+          }
+      }
+'@
+      [DisplayWake]::Wake()
+    `;
+
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psScript],
+      { shell: false, windowsHide: true }
+    );
+
+    child.once("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Wake command exited with code ${code}`));
+    });
+    child.once("error", reject);
+  });
+}
+
+const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock"];
 
 let cachedBattery = null;
 let lastBatteryFetchTime = 0;
@@ -473,6 +586,7 @@ async function pollOnce() {
 
     let status = "completed";
     let failureReason = null;
+    let imageData = null;
 
     if (action === "sleep") {
       // For sleep, we notify Supabase that it was completed BEFORE putting the machine into sleep,
@@ -492,6 +606,28 @@ async function pollOnce() {
         failureReason =
           error instanceof Error ? error.message : "Windows sleep execution failed";
         console.error("Could not sleep Windows:", failureReason);
+      }
+    } else if (action === "screenshot") {
+      try {
+        console.log("Capturing desktop screenshot...");
+        imageData = await captureScreen();
+        console.log("Desktop screenshot captured successfully.");
+      } catch (error) {
+        status = "failed";
+        failureReason =
+          error instanceof Error ? error.message : "Screen capture execution failed";
+        console.error("Could not capture screen:", failureReason);
+      }
+    } else if (action === "unlock") {
+      try {
+        console.log("Sending display wake and unlock signal...");
+        await unlockOrWakeWindows();
+        console.log("Display wake signal sent successfully.");
+      } catch (error) {
+        status = "failed";
+        failureReason =
+          error instanceof Error ? error.message : "Unlock/wake execution failed";
+        console.error("Could not wake/unlock Windows:", failureReason);
       }
     } else {
       try {
@@ -519,6 +655,10 @@ async function pollOnce() {
       command_id: command.id,
       status,
     };
+
+    if (imageData) {
+      payload.image_data = imageData;
+    }
 
     if (failureReason) {
       // Sanitize failure reason (strip non-printable characters, limit to 255 chars)
