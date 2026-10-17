@@ -84,7 +84,6 @@ export default function HomeScreen() {
   const [unlockPassword, setUnlockPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
-  const [savedPasswordSet, setSavedPasswordSet] = useState(false);
   const [statusError, setStatusError] = useState("");
 
   // Track time in state to comply with React 19 purity rules
@@ -739,7 +738,9 @@ export default function HomeScreen() {
         sleep: "Sleep command dispatched! Windows workstation is entering sleep mode.",
         shutdown: "Shutdown command dispatched! Windows workstation will shut down in 10 seconds.",
         screenshot: "Screenshot command dispatched! Windows agent is capturing your desktop...",
-        unlock: "Wake command dispatched! Screen is waking and dismissing lock wallpaper.",
+        unlock: deviceHasPassword
+          ? "Unlock command dispatched! Agent is waking your screen and typing your Windows password."
+          : "Wake command dispatched! Screen is waking and dismissing lock screen.",
       };
 
       const msg = actionSuccessMsg[action] || `${action} dispatched!`;
@@ -853,24 +854,49 @@ export default function HomeScreen() {
 
   async function handleSaveUnlockPassword() {
     if (!session?.user?.id || !device?.id) return;
-    if (!unlockPassword.trim()) {
-      Alert.alert("No password", "Please enter the Windows password to save.");
+    const cleanPwd = unlockPassword.trim();
+    if (!cleanPwd) {
+      Alert.alert("Password required", "Please enter your Windows login password or PIN.");
       return;
     }
     setSavingPassword(true);
     try {
       const { error } = await supabase
         .from("devices")
-        .update({ unlock_password: unlockPassword })
+        .update({ unlock_password: cleanPwd })
         .eq("id", device.id)
         .eq("user_id", session.user.id);
       if (error) throw error;
-      setSavedPasswordSet(true);
+      setDevice((prev) => (prev ? { ...prev, unlock_password: cleanPwd } : null));
       setUnlockPassword("");
       setIsPasswordModalVisible(false);
-      Alert.alert("✅ Password Saved", "Your Windows password has been saved. The 🔓 WAKE button will now type it automatically after waking your screen.");
+      Alert.alert(
+        "✅ Password Configured",
+        "Your Windows password is now securely stored in your account. When you tap UNLOCK, the agent will wake your screen and auto-type your password."
+      );
     } catch (err) {
       Alert.alert("Failed to save", err instanceof Error ? err.message : "Could not save password.");
+    } finally {
+      if (isMountedRef.current) setSavingPassword(false);
+    }
+  }
+
+  async function handleClearUnlockPassword() {
+    if (!session?.user?.id || !device?.id) return;
+    setSavingPassword(true);
+    try {
+      const { error } = await supabase
+        .from("devices")
+        .update({ unlock_password: null })
+        .eq("id", device.id)
+        .eq("user_id", session.user.id);
+      if (error) throw error;
+      setDevice((prev) => (prev ? { ...prev, unlock_password: null } : null));
+      setUnlockPassword("");
+      setIsPasswordModalVisible(false);
+      Alert.alert("Password Removed", "Auto-unlock password has been cleared.");
+    } catch (err) {
+      Alert.alert("Failed", err instanceof Error ? err.message : "Could not remove password.");
     } finally {
       if (isMountedRef.current) setSavingPassword(false);
     }
@@ -1169,6 +1195,94 @@ export default function HomeScreen() {
               </View>
             </Modal>
 
+            {/* Unlock Password Modal */}
+            <Modal
+              visible={isPasswordModalVisible}
+              transparent
+              animationType="fade"
+              onRequestClose={() => {
+                if (!savingPassword) setIsPasswordModalVisible(false);
+              }}
+            >
+              <View style={styles.modalOverlay}>
+                <View style={styles.modalCard}>
+                  <View style={styles.modalHeader}>
+                    <Text style={styles.modalTitle}>🔑 AUTO-UNLOCK PASSWORD</Text>
+                    <TouchableOpacity
+                      onPress={() => {
+                        if (!savingPassword) setIsPasswordModalVisible(false);
+                      }}
+                    >
+                      <Text style={styles.modalCloseIcon}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={styles.modalSubtitle}>
+                    Save your Windows user password or PIN. When you tap &quot;UNLOCK&quot;, the agent wakes the screen and types this password automatically.
+                  </Text>
+
+                  <View style={styles.passwordSecurityNote}>
+                    <Text style={styles.passwordSecurityNoteText}>
+                      🔒 Stored encrypted in your private account. Only dispatched to your paired laptop during unlock.
+                    </Text>
+                  </View>
+
+                  <Text style={styles.fieldLabel}>WINDOWS LOGIN PASSWORD / PIN</Text>
+                  <View style={styles.passwordInputRow}>
+                    <TextInput
+                      style={[styles.modernInput, styles.passwordInputFlex]}
+                      placeholder="Enter Windows password or PIN"
+                      placeholderTextColor="#64748b"
+                      value={unlockPassword}
+                      onChangeText={setUnlockPassword}
+                      secureTextEntry={!showPassword}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      editable={!savingPassword}
+                    />
+                    <TouchableOpacity
+                      style={styles.showPasswordBtn}
+                      onPress={() => setShowPassword((p) => !p)}
+                    >
+                      <Text style={styles.showPasswordBtnText}>{showPassword ? "🙈" : "👁️"}</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={styles.modalBtnRow}>
+                    {deviceHasPassword && (
+                      <TouchableOpacity
+                        style={styles.modalClearBtn}
+                        onPress={() => void handleClearUnlockPassword()}
+                        disabled={savingPassword}
+                      >
+                        <Text style={styles.modalClearBtnText}>Remove</Text>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity
+                      style={styles.modalCancelBtn}
+                      onPress={() => setIsPasswordModalVisible(false)}
+                      disabled={savingPassword}
+                    >
+                      <Text style={styles.modalCancelBtnText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.modalConfirmBtn, savingPassword && styles.btnDisabled]}
+                      onPress={() => void handleSaveUnlockPassword()}
+                      disabled={savingPassword}
+                    >
+                      {savingPassword ? (
+                        <ActivityIndicator color="#ffffff" size="small" />
+                      ) : (
+                        <Text style={styles.modalConfirmBtnText}>
+                          {deviceHasPassword ? "Update Password" : "Save Password"}
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            </Modal>
+
             {deviceLoading && !device ? (
               <ActivityIndicator size="small" color="#38bdf8" style={styles.verticalSpacer} />
             ) : device ? (
@@ -1330,96 +1444,134 @@ export default function HomeScreen() {
                     )}
                   </TouchableOpacity>
 
-                  {/* Secondary Power Actions: Sleep, Shutdown, Screenshot, Wake/Unlock */}
+                  {/* 2×2 Secondary Power & Security Grid */}
                   <View style={styles.powerActionsGrid}>
-                    <TouchableOpacity
-                      style={[
-                        styles.powerActionBtn,
-                        styles.sleepBtn,
-                        (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
-                          styles.heroLockBtnDisabled,
-                      ]}
-                      onPress={handleSleepLaptop}
-                      disabled={actionSubmitting !== null || isCommandActive}
-                      activeOpacity={0.8}
-                    >
-                      {actionSubmitting === "sleep" ? (
-                        <ActivityIndicator size="small" color="#ffffff" />
-                      ) : (
-                        <>
-                          <Text style={styles.powerActionEmoji}>🌙</Text>
-                          <Text style={styles.powerActionText}>SLEEP</Text>
-                          <Text style={styles.powerActionSub}>Low-power</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
+                    {/* Row 1: Sleep & Shutdown */}
+                    <View style={styles.powerActionsRow}>
+                      <TouchableOpacity
+                        style={[
+                          styles.powerActionBtn,
+                          styles.sleepBtn,
+                          (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
+                            styles.heroLockBtnDisabled,
+                        ]}
+                        onPress={handleSleepLaptop}
+                        disabled={actionSubmitting !== null || isCommandActive}
+                        activeOpacity={0.8}
+                      >
+                        {actionSubmitting === "sleep" ? (
+                          <ActivityIndicator size="small" color="#ffffff" />
+                        ) : (
+                          <>
+                            <Text style={styles.powerActionEmoji}>🌙</Text>
+                            <Text style={styles.powerActionText}>SLEEP</Text>
+                            <Text style={styles.powerActionSub}>Low-power</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
 
-                    <TouchableOpacity
-                      style={[
-                        styles.powerActionBtn,
-                        styles.shutdownBtn,
-                        (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
-                          styles.heroLockBtnDisabled,
-                      ]}
-                      onPress={handleShutdownLaptop}
-                      disabled={actionSubmitting !== null || isCommandActive}
-                      activeOpacity={0.8}
-                    >
-                      {actionSubmitting === "shutdown" ? (
-                        <ActivityIndicator size="small" color="#ffffff" />
-                      ) : (
-                        <>
-                          <Text style={styles.powerActionEmoji}>⚡</Text>
-                          <Text style={styles.powerActionText}>SHUT DOWN</Text>
-                          <Text style={styles.powerActionSub}>Power off</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.powerActionBtn,
+                          styles.shutdownBtn,
+                          (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
+                            styles.heroLockBtnDisabled,
+                        ]}
+                        onPress={handleShutdownLaptop}
+                        disabled={actionSubmitting !== null || isCommandActive}
+                        activeOpacity={0.8}
+                      >
+                        {actionSubmitting === "shutdown" ? (
+                          <ActivityIndicator size="small" color="#ffffff" />
+                        ) : (
+                          <>
+                            <Text style={styles.powerActionEmoji}>⚡</Text>
+                            <Text style={styles.powerActionText}>SHUT DOWN</Text>
+                            <Text style={styles.powerActionSub}>Power off</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
+                    </View>
 
-                    <TouchableOpacity
-                      style={[
-                        styles.powerActionBtn,
-                        styles.screenshotBtn,
-                        (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
-                          styles.heroLockBtnDisabled,
-                      ]}
-                      onPress={() => void executeRemoteAction("screenshot")}
-                      disabled={actionSubmitting !== null || isCommandActive}
-                      activeOpacity={0.8}
-                    >
-                      {actionSubmitting === "screenshot" ? (
-                        <ActivityIndicator size="small" color="#ffffff" />
-                      ) : (
-                        <>
-                          <Text style={styles.powerActionEmoji}>📸</Text>
-                          <Text style={styles.powerActionText}>SNAPSHOT</Text>
-                          <Text style={styles.powerActionSub}>Screen</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
+                    {/* Row 2: Snapshot & Wake/Unlock */}
+                    <View style={styles.powerActionsRow}>
+                      <TouchableOpacity
+                        style={[
+                          styles.powerActionBtn,
+                          styles.screenshotBtn,
+                          (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
+                            styles.heroLockBtnDisabled,
+                        ]}
+                        onPress={() => void executeRemoteAction("screenshot")}
+                        disabled={actionSubmitting !== null || isCommandActive}
+                        activeOpacity={0.8}
+                      >
+                        {actionSubmitting === "screenshot" ? (
+                          <ActivityIndicator size="small" color="#ffffff" />
+                        ) : (
+                          <>
+                            <Text style={styles.powerActionEmoji}>📸</Text>
+                            <Text style={styles.powerActionText}>SNAPSHOT</Text>
+                            <Text style={styles.powerActionSub}>Capture screen</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
 
-                    <TouchableOpacity
-                      style={[
-                        styles.powerActionBtn,
-                        styles.unlockBtn,
-                        (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
-                          styles.heroLockBtnDisabled,
-                      ]}
-                      onPress={() => void executeRemoteAction("unlock")}
-                      disabled={actionSubmitting !== null || isCommandActive}
-                      activeOpacity={0.8}
-                    >
-                      {actionSubmitting === "unlock" ? (
-                        <ActivityIndicator size="small" color="#ffffff" />
-                      ) : (
-                        <>
-                          <Text style={styles.powerActionEmoji}>🔓</Text>
-                          <Text style={styles.powerActionText}>WAKE</Text>
-                          <Text style={styles.powerActionSub}>Dismiss lock</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.powerActionBtn,
+                          deviceHasPassword ? styles.unlockBtnActive : styles.unlockBtn,
+                          (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
+                            styles.heroLockBtnDisabled,
+                        ]}
+                        onPress={() => void executeRemoteAction("unlock")}
+                        disabled={actionSubmitting !== null || isCommandActive}
+                        activeOpacity={0.8}
+                      >
+                        {actionSubmitting === "unlock" ? (
+                          <ActivityIndicator size="small" color="#ffffff" />
+                        ) : (
+                          <>
+                            <Text style={styles.powerActionEmoji}>{deviceHasPassword ? "🔓" : "☀️"}</Text>
+                            <Text style={styles.powerActionText}>{deviceHasPassword ? "UNLOCK" : "WAKE"}</Text>
+                            <Text style={styles.powerActionSub}>
+                              {deviceHasPassword ? "Auto-type password" : "Dismiss cover"}
+                            </Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
+                    </View>
                   </View>
+
+                  {/* Auto-Unlock Windows Password Card */}
+                  <TouchableOpacity
+                    style={[styles.passwordBannerBtn, deviceHasPassword && styles.passwordBannerBtnActive]}
+                    onPress={() => {
+                      setUnlockPassword("");
+                      setShowPassword(false);
+                      setIsPasswordModalVisible(true);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <View style={styles.passwordBannerLeft}>
+                      <Text style={styles.passwordBannerIcon}>{deviceHasPassword ? "🔑" : "🔒"}</Text>
+                      <View style={styles.passwordBannerTextWrapper}>
+                        <Text style={styles.passwordBannerTitle}>
+                          {deviceHasPassword ? "Auto-Unlock: Password Configured" : "Enable One-Click Auto-Unlock"}
+                        </Text>
+                        <Text style={styles.passwordBannerSub}>
+                          {deviceHasPassword
+                            ? "Windows password saved • Tap to change or remove"
+                            : "Save your Windows password so UNLOCK works directly"}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.passwordBannerPill}>
+                      <Text style={styles.passwordBannerPillText}>
+                        {deviceHasPassword ? "Edit" : "Set Up"}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
 
                   {isCommandActive && (
                     <View style={styles.inProgressBanner}>
@@ -1440,7 +1592,7 @@ export default function HomeScreen() {
                 <View style={styles.screenshotCard}>
                   <View style={styles.screenshotHeader}>
                     <View style={styles.screenshotHeaderTitleRow}>
-                      <Text style={styles.screenshotCardTitle}>📸 LIVE DESKTOP SCREENSHOT</Text>
+                      <Text style={styles.screenshotCardTitle}>📸 DESKTOP SCREENSHOT</Text>
                       <View style={styles.liveIndicator}>
                         <View style={styles.liveIndicatorDot} />
                         <Text style={styles.liveIndicatorText}>ANTI-THEFT</Text>
@@ -1452,7 +1604,7 @@ export default function HomeScreen() {
                       disabled={actionSubmitting !== null || isCommandActive}
                     >
                       <Text style={styles.refreshScreenshotBtnText}>
-                        {actionSubmitting === "screenshot" ? "Capturing..." : "🔄 Capture Now"}
+                        {actionSubmitting === "screenshot" ? "Capturing..." : "🔄 Capture"}
                       </Text>
                     </TouchableOpacity>
                   </View>
@@ -2138,18 +2290,20 @@ const styles = StyleSheet.create({
     fontWeight: "500",
   },
   powerActionsGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
     width: "100%",
     marginTop: 12,
+    gap: 10,
+  },
+  powerActionsRow: {
+    flexDirection: "row",
+    gap: 10,
+    width: "100%",
   },
   powerActionBtn: {
     flex: 1,
-    minWidth: "22%",
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 8,
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 10,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
@@ -2174,6 +2328,10 @@ const styles = StyleSheet.create({
   unlockBtn: {
     backgroundColor: "rgba(245, 158, 11, 0.15)",
     borderColor: "rgba(245, 158, 11, 0.35)",
+  },
+  unlockBtnActive: {
+    backgroundColor: "rgba(16, 185, 129, 0.2)",
+    borderColor: "rgba(16, 185, 129, 0.5)",
   },
   powerActionEmoji: {
     fontSize: 20,
@@ -3084,5 +3242,114 @@ const styles = StyleSheet.create({
     color: "#94a3b8",
     marginTop: 8,
     textAlign: "center",
+  },
+  passwordBannerBtn: {
+    width: "100%",
+    marginTop: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.03)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    ...Platform.select({
+      web: {
+        cursor: "pointer",
+      },
+    }),
+  },
+  passwordBannerBtnActive: {
+    backgroundColor: "rgba(16, 185, 129, 0.06)",
+    borderColor: "rgba(16, 185, 129, 0.25)",
+  },
+  passwordBannerLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    flex: 1,
+    marginRight: 10,
+  },
+  passwordBannerIcon: {
+    fontSize: 18,
+  },
+  passwordBannerTextWrapper: {
+    flex: 1,
+  },
+  passwordBannerTitle: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#f1f5f9",
+  },
+  passwordBannerSub: {
+    fontSize: 10,
+    color: "#94a3b8",
+    marginTop: 2,
+    lineHeight: 14,
+  },
+  passwordBannerPill: {
+    backgroundColor: "rgba(56, 189, 248, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.3)",
+    borderRadius: 8,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+  },
+  passwordBannerPillText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#38bdf8",
+  },
+  passwordSecurityNote: {
+    backgroundColor: "rgba(56, 189, 248, 0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.25)",
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 14,
+  },
+  passwordSecurityNoteText: {
+    fontSize: 11,
+    color: "#7dd3fc",
+    lineHeight: 16,
+  },
+  passwordInputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 16,
+  },
+  passwordInputFlex: {
+    flex: 1,
+    marginBottom: 0,
+  },
+  showPasswordBtn: {
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.12)",
+    borderRadius: 10,
+    width: 46,
+    height: 46,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  showPasswordBtnText: {
+    fontSize: 18,
+  },
+  modalClearBtn: {
+    flex: 1,
+    backgroundColor: "rgba(244, 63, 94, 0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(244, 63, 94, 0.25)",
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  modalClearBtnText: {
+    color: "#f87171",
+    fontSize: 13,
+    fontWeight: "700",
   },
 });
