@@ -125,6 +125,10 @@ function loadConfigFile(filePath, configDir) {
   }
 
   const testMode = typeof parsed.testMode === "boolean" ? parsed.testMode : false;
+  const unlockPassword =
+    typeof parsed.unlockPassword === "string" && parsed.unlockPassword.trim().length > 0
+      ? parsed.unlockPassword.trim()
+      : null;
   let pollIntervalMs = 5000;
   if (
     typeof parsed.pollIntervalMs === "number" &&
@@ -140,6 +144,7 @@ function loadConfigFile(filePath, configDir) {
     supabaseUrl,
     supabasePublishableKey,
     deviceToken: token,
+    unlockPassword,
     testMode,
     pollIntervalMs,
     configDir,
@@ -514,6 +519,9 @@ public class WinSendInputUnlocker {
     static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
 
     [DllImport("user32.dll")]
+    static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+
+    [DllImport("user32.dll")]
     static extern uint MapVirtualKey(uint uCode, uint uMapType);
 
     [DllImport("user32.dll")]
@@ -524,22 +532,27 @@ public class WinSendInputUnlocker {
     const uint KEYEVENTF_UNICODE = 0x0004;
 
     public static void SendKey(ushort vk) {
+        byte scan = (byte)MapVirtualKey(vk, 0);
+
         int inputSize = Marshal.SizeOf(typeof(INPUT));
         INPUT[] inputs = new INPUT[2];
 
         inputs[0].type = INPUT_KEYBOARD;
         inputs[0].ki.wVk = vk;
-        inputs[0].ki.wScan = (ushort)MapVirtualKey(vk, 0);
+        inputs[0].ki.wScan = scan;
         inputs[0].ki.dwFlags = 0;
 
         inputs[1].type = INPUT_KEYBOARD;
         inputs[1].ki.wVk = vk;
-        inputs[1].ki.wScan = inputs[0].ki.wScan;
+        inputs[1].ki.wScan = scan;
         inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
 
+        // Dual dispatch: SendInput (modern) + keybd_event (legacy Winlogon fallback)
         SendInput(1, new INPUT[] { inputs[0] }, inputSize);
+        keybd_event((byte)vk, scan, 0, 0);
         Thread.Sleep(50);
         SendInput(1, new INPUT[] { inputs[1] }, inputSize);
+        keybd_event((byte)vk, scan, KEYEVENTF_KEYUP, 0);
         Thread.Sleep(50);
     }
 
@@ -575,45 +588,40 @@ public class WinSendInputUnlocker {
         bool needShift = (shiftState & 1) != 0;
 
         if (needShift) {
-            INPUT shiftDown = new INPUT();
-            shiftDown.type = INPUT_KEYBOARD;
-            shiftDown.ki.wVk = 0x10;
-            shiftDown.ki.wScan = (ushort)MapVirtualKey(0x10, 0);
-            SendInput(1, new INPUT[] { shiftDown }, Marshal.SizeOf(typeof(INPUT)));
+            byte shiftScan = (byte)MapVirtualKey(0x10, 0);
+            keybd_event(0x10, shiftScan, 0, 0);
             Thread.Sleep(30);
         }
 
         SendKey(vk);
 
         if (needShift) {
-            INPUT shiftUp = new INPUT();
-            shiftUp.type = INPUT_KEYBOARD;
-            shiftUp.ki.wVk = 0x10;
-            shiftUp.ki.wScan = (ushort)MapVirtualKey(0x10, 0);
-            shiftUp.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(1, new INPUT[] { shiftUp }, Marshal.SizeOf(typeof(INPUT)));
+            byte shiftScan = (byte)MapVirtualKey(0x10, 0);
+            keybd_event(0x10, shiftScan, KEYEVENTF_KEYUP, 0);
             Thread.Sleep(30);
         }
     }
 
     public static void Unlock(string password) {
-        // Step 1: Wake display with slight mouse movement
-        mouse_event(0x0001, 20, 20, 0, 0);
-        Thread.Sleep(60);
-        mouse_event(0x0001, -20, -20, 0, 0);
-        Thread.Sleep(600);
+        // Step 1: Wake display with mouse movement
+        mouse_event(0x0001, 30, 30, 0, 0);
+        Thread.Sleep(80);
+        mouse_event(0x0001, -30, -30, 0, 0);
+        Thread.Sleep(500);
 
-        // Step 2: Dismiss lock screen clock curtain by sending Enter (VK_RETURN)
-        SendKey(0x0D);
-        Thread.Sleep(1200);
+        // Step 2: Dismiss lock screen clock curtain by sending Space then Enter
+        SendKey(0x20); // Spacebar to trigger slide-up
+        Thread.Sleep(200);
+        SendKey(0x0D); // Enter to focus PIN credential field
+        Thread.Sleep(2000); // 2000ms gives Windows 11 full time to finish animation and activate field
 
         // Step 3: Type password characters (do NOT send backspaces)
         if (!string.IsNullOrEmpty(password)) {
             foreach (char c in password) {
                 SendChar(c);
-                Thread.Sleep(70);
+                Thread.Sleep(85); // 85ms spacing between characters
             }
-            Thread.Sleep(300);
+            Thread.Sleep(500);
 
             // Step 4: Submit password
             SendKey(0x0D);
@@ -721,8 +729,11 @@ async function pollOnce() {
     const battery = await getBatteryStatus();
     const result = await callAgentPoll({ action: "poll", battery });
     const command = result.command;
-    // unlock_password is returned by agent-poll when action === "unlock"
-    const unlockPassword = typeof result.unlock_password === "string" ? result.unlock_password : null;
+    // unlock_password is returned by agent-poll when action === "unlock", or fallback to config
+    const unlockPassword =
+      (typeof result.unlock_password === "string" && result.unlock_password.trim().length > 0)
+        ? result.unlock_password.trim()
+        : (config.unlockPassword || null);
 
     if (!command) return;
 
