@@ -20,6 +20,9 @@ type Device = {
   name: string;
   platform: string;
   last_seen_at: string | null;
+  battery_level?: number | null;
+  is_charging?: boolean | null;
+  power_online?: boolean | null;
 };
 
 type LockCommand = {
@@ -134,7 +137,7 @@ export default function HomeScreen() {
       try {
         const { data, error } = await supabase
           .from("devices")
-          .select("id, name, platform, last_seen_at")
+          .select("id, name, platform, last_seen_at, battery_level, is_charging, power_online")
           .eq("user_id", userId)
           .order("created_at", { ascending: false });
 
@@ -1078,6 +1081,52 @@ export default function HomeScreen() {
                   </Text>
                 </View>
 
+                {/* Live Battery Telemetry Widget */}
+                {typeof device.battery_level === "number" && (
+                  <View style={styles.batteryCard}>
+                    <View style={styles.batteryHeader}>
+                      <View style={styles.batteryTitleRow}>
+                        <Text style={styles.batteryIcon}>
+                          {device.is_charging ? "⚡" : device.battery_level <= 20 ? "🪫" : "🔋"}
+                        </Text>
+                        <Text style={styles.batteryTitle}>
+                          BATTERY LEVEL • {device.is_charging ? "CHARGING" : device.power_online ? "PLUGGED IN" : "ON BATTERY"}
+                        </Text>
+                      </View>
+                      <Text
+                        style={[
+                          styles.batteryPercentText,
+                          device.battery_level <= 20
+                            ? styles.batteryTextLow
+                            : device.battery_level <= 50
+                            ? styles.batteryTextMid
+                            : styles.batteryTextHigh,
+                        ]}
+                      >
+                        {device.battery_level}%
+                      </Text>
+                    </View>
+
+                    {/* Battery Fill Track */}
+                    <View style={styles.batteryTrack}>
+                      <View
+                        style={[
+                          styles.batteryFill,
+                          {
+                            width: `${Math.max(5, Math.min(100, device.battery_level))}%`,
+                            backgroundColor:
+                              device.battery_level <= 20
+                                ? "#ef4444"
+                                : device.battery_level <= 50
+                                ? "#f59e0b"
+                                : "#10b981",
+                          },
+                        ]}
+                      />
+                    </View>
+                  </View>
+                )}
+
                 {/* Quick Diagnostics Chips */}
                 <View style={styles.specsGrid}>
                   <View style={styles.specChip}>
@@ -1733,6 +1782,61 @@ const styles = StyleSheet.create({
   heartbeatDetailText: {
     fontSize: 11,
     fontWeight: "600",
+  },
+  batteryCard: {
+    width: "100%",
+    backgroundColor: "rgba(16, 24, 39, 0.7)",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 14,
+  },
+  batteryHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  batteryTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  batteryIcon: {
+    fontSize: 14,
+  },
+  batteryTitle: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#94a3b8",
+    letterSpacing: 0.8,
+  },
+  batteryPercentText: {
+    fontSize: 14,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  batteryTextHigh: {
+    color: "#34d399",
+  },
+  batteryTextMid: {
+    color: "#fbbf24",
+  },
+  batteryTextLow: {
+    color: "#f87171",
+  },
+  batteryTrack: {
+    width: "100%",
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    overflow: "hidden",
+  },
+  batteryFill: {
+    height: "100%",
+    borderRadius: 3,
   },
   specsGrid: {
     flexDirection: "row",

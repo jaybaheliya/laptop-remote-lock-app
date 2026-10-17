@@ -386,13 +386,63 @@ function shutdownWindows() {
 
 const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown"];
 
+let cachedBattery = null;
+let lastBatteryFetchTime = 0;
+
+function getBatteryStatus() {
+  const now = Date.now();
+  // Cache for 15 seconds to avoid spawning PowerShell on every 5s poll cycle
+  if (cachedBattery && now - lastBatteryFetchTime < 15000) {
+    return Promise.resolve(cachedBattery);
+  }
+
+  return new Promise((resolve) => {
+    const psScript = "& { $b = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue; $s = Get-CimInstance -Namespace root\\wmi -ClassName BatteryStatus -ErrorAction SilentlyContinue; if ($b) { [PSCustomObject]@{ level = [int]$b.EstimatedChargeRemaining; is_charging = [bool]($s.Charging -or $s.PowerOnline); power_online = [bool]$s.PowerOnline } | ConvertTo-Json -Compress } else { [PSCustomObject]@{ level = 100; is_charging = $false; power_online = $true } | ConvertTo-Json -Compress } }";
+
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psScript],
+      { shell: false, windowsHide: true }
+    );
+
+    let stdout = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.once("close", (code) => {
+      if (code === 0 && stdout.trim()) {
+        try {
+          const parsed = JSON.parse(stdout.trim());
+          cachedBattery = {
+            level: typeof parsed.level === "number" ? parsed.level : null,
+            is_charging: Boolean(parsed.is_charging),
+            power_online: Boolean(parsed.power_online),
+          };
+          lastBatteryFetchTime = now;
+          resolve(cachedBattery);
+          return;
+        } catch {
+          // Keep previous cache if parse fails
+        }
+      }
+      resolve(cachedBattery);
+    });
+
+    child.once("error", () => {
+      resolve(cachedBattery);
+    });
+  });
+}
+
 async function pollOnce() {
   if (busy || stopped) return;
 
   busy = true;
 
   try {
-    const result = await callAgentPoll({ action: "poll" });
+    const battery = await getBatteryStatus();
+    const result = await callAgentPoll({ action: "poll", battery });
     const command = result.command;
 
     if (!command) return;

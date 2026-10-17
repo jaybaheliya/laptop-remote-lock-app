@@ -70,6 +70,11 @@ Deno.serve(async (req: Request) => {
     command_id?: string;
     status?: string;
     failure_reason?: string;
+    battery?: {
+      level?: number;
+      is_charging?: boolean;
+      power_online?: boolean;
+    };
   };
 
   try {
@@ -126,6 +131,23 @@ Deno.serve(async (req: Request) => {
 
     const heartbeatTime = new Date().toISOString();
 
+    const deviceUpdatePayload: Record<string, unknown> = {
+      last_seen_at: heartbeatTime,
+    };
+
+    if (body.battery && typeof body.battery === "object") {
+      const b = body.battery;
+      if (typeof b.level === "number" && Number.isFinite(b.level)) {
+        deviceUpdatePayload.battery_level = Math.max(0, Math.min(100, Math.round(b.level)));
+      }
+      if (typeof b.is_charging === "boolean") {
+        deviceUpdatePayload.is_charging = b.is_charging;
+      }
+      if (typeof b.power_online === "boolean") {
+        deviceUpdatePayload.power_online = b.power_online;
+      }
+    }
+
     const [credResult, deviceResult] = await Promise.all([
       admin
         .from("device_agent_credentials")
@@ -134,7 +156,7 @@ Deno.serve(async (req: Request) => {
         .eq("user_id", userId),
       admin
         .from("devices")
-        .update({ last_seen_at: heartbeatTime })
+        .update(deviceUpdatePayload)
         .eq("id", deviceId)
         .eq("user_id", userId),
     ]);
