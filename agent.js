@@ -181,13 +181,34 @@ function loadLegacyConfig() {
   };
 }
 
-const config = resolveConfig();
-const SUPABASE_URL = config.supabaseUrl;
-const DEVICE_ID = config.deviceId;
-const POLL_INTERVAL_MS = config.pollIntervalMs;
-const TEST_MODE = config.testMode;
-const deviceToken = config.deviceToken;
-const PID_FILE = config.pidFile;
+let config = resolveConfig();
+let SUPABASE_URL = config.supabaseUrl;
+let DEVICE_ID = config.deviceId;
+let POLL_INTERVAL_MS = config.pollIntervalMs;
+let TEST_MODE = config.testMode;
+let deviceToken = config.deviceToken;
+let PID_FILE = config.pidFile;
+
+function reloadConfigIfChanged() {
+  try {
+    const newConfig = resolveConfig();
+    if (
+      newConfig.deviceToken !== deviceToken ||
+      newConfig.deviceId !== DEVICE_ID ||
+      newConfig.supabaseUrl !== SUPABASE_URL
+    ) {
+      console.log(`Configuration update detected. Switching to device: ${newConfig.deviceId}`);
+      config = newConfig;
+      SUPABASE_URL = newConfig.supabaseUrl;
+      DEVICE_ID = newConfig.deviceId;
+      POLL_INTERVAL_MS = newConfig.pollIntervalMs;
+      TEST_MODE = newConfig.testMode;
+      deviceToken = newConfig.deviceToken;
+    }
+  } catch (err) {
+    // Keep running with existing config if file is temporarily being written
+  }
+}
 
 // Single-instance enforcement: ensure only one agent process runs at a time
 function acquirePidLock() {
@@ -196,14 +217,12 @@ function acquirePidLock() {
       const existingPid = parseInt(fs.readFileSync(PID_FILE, "utf8").trim(), 10);
       if (!isNaN(existingPid) && existingPid !== process.pid) {
         try {
-          // Signal 0 verifies process existence without killing it
           process.kill(existingPid, 0);
           console.log(
             `Another agent instance is already running (PID: ${existingPid}). Exiting duplicate process.`
           );
           process.exit(0);
         } catch {
-          // Process does not exist; lock is stale
           console.log(`Clearing stale PID file from previous PID ${existingPid}.`);
         }
       }
@@ -236,8 +255,12 @@ acquirePidLock();
 
 let busy = false;
 let stopped = false;
+let consecutiveAuthErrors = 0;
 
 async function callAgentPoll(body) {
+  // Check if config.json was updated on disk before polling
+  reloadConfigIfChanged();
+
   const response = await fetch(
     `${SUPABASE_URL}/functions/v1/agent-poll`,
     {
@@ -255,6 +278,17 @@ async function callAgentPoll(body) {
   const result = await response.json().catch(() => ({}));
 
   if (!response.ok) {
+    if (response.status === 401) {
+      consecutiveAuthErrors++;
+      // If the token was revoked or deleted on the dashboard, check disk for updated config
+      reloadConfigIfChanged();
+      // If 3 consecutive 401 errors occur and config hasn't changed on disk,
+      // exit so start-agent.bat restarts cleanly and reloads
+      if (consecutiveAuthErrors >= 3) {
+        console.error("Device token rejected (401). Exiting so supervisor can reload fresh credentials.");
+        process.exit(1);
+      }
+    }
     throw new Error(
       `Agent API returned HTTP ${response.status}: ${
         result.error || "Request failed"
@@ -262,6 +296,7 @@ async function callAgentPoll(body) {
     );
   }
 
+  consecutiveAuthErrors = 0;
   return result;
 }
 
