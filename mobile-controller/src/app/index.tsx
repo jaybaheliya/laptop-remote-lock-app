@@ -1038,37 +1038,19 @@ export default function HomeScreen() {
                   </View>
                 </View>
 
-                {/* Workstation Action Row: View Pairing Key & Remove Laptop */}
-                <View style={styles.deviceActionRow}>
-                  {storedPairingKeys[device.id] ? (
-                    <TouchableOpacity
-                      style={styles.viewPairingKeyBtn}
-                      onPress={() => {
-                        setPairedDeviceName(device.name);
-                        setPairingKey(storedPairingKeys[device.id]);
-                        setCopiedKey(false);
-                        setIsPairingModalVisible(true);
-                      }}
-                    >
-                      <Text style={styles.viewPairingKeyBtnText}>🔑 View Pairing Key</Text>
-                    </TouchableOpacity>
-                  ) : null}
-
+                {storedPairingKeys[device.id] ? (
                   <TouchableOpacity
-                    style={[
-                      styles.deleteDeviceBtn,
-                      deletingLaptop && styles.btnDisabled,
-                    ]}
-                    onPress={() => void handleDeleteLaptop(device)}
-                    disabled={deletingLaptop}
+                    style={styles.viewPairingKeyBtn}
+                    onPress={() => {
+                      setPairedDeviceName(device.name);
+                      setPairingKey(storedPairingKeys[device.id]);
+                      setCopiedKey(false);
+                      setIsPairingModalVisible(true);
+                    }}
                   >
-                    {deletingLaptop ? (
-                      <ActivityIndicator size="small" color="#f87171" />
-                    ) : (
-                      <Text style={styles.deleteDeviceBtnText}>🗑 Remove Workstation</Text>
-                    )}
+                    <Text style={styles.viewPairingKeyBtnText}>🔑 View Pairing Key</Text>
                   </TouchableOpacity>
-                </View>
+                ) : null}
               </>
             ) : (
               <Text style={styles.notRegisteredNotice}>
@@ -1301,6 +1283,25 @@ export default function HomeScreen() {
                     {historyLoading || deviceLoading ? "Syncing..." : "↻ Manual Sync"}
                   </Text>
                 </TouchableOpacity>
+
+                {/* Workstation Danger Zone / Removal */}
+                <View style={styles.dangerZoneCard}>
+                  <TouchableOpacity
+                    style={[
+                      styles.deleteDeviceBtn,
+                      deletingLaptop && styles.btnDisabled,
+                    ]}
+                    onPress={() => void handleDeleteLaptop(device)}
+                    disabled={deletingLaptop}
+                    activeOpacity={0.7}
+                  >
+                    {deletingLaptop ? (
+                      <ActivityIndicator size="small" color="#f87171" />
+                    ) : (
+                      <Text style={styles.deleteDeviceBtnText}>🗑 Remove {device.name}</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
               </>
             )}
           </View>
@@ -2427,14 +2428,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
   },
+  dangerZoneCard: {
+    width: "100%",
+    marginTop: 18,
+    marginBottom: 8,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.06)",
+    alignItems: "center",
+  },
   deleteDeviceBtn: {
-    flex: 1,
-    backgroundColor: "rgba(244, 63, 94, 0.08)",
+    width: "100%",
+    backgroundColor: "rgba(244, 63, 94, 0.06)",
     borderWidth: 1,
-    borderColor: "rgba(244, 63, 94, 0.25)",
-    borderRadius: 10,
-    paddingVertical: 9,
-    paddingHorizontal: 10,
+    borderColor: "rgba(244, 63, 94, 0.2)",
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -2442,5 +2452,6 @@ const styles = StyleSheet.create({
     color: "#f87171",
     fontSize: 12,
     fontWeight: "700",
+    letterSpacing: 0.3,
   },
 });
