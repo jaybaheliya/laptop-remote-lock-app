@@ -215,7 +215,27 @@ Deno.serve(async (req: Request) => {
       }
 
       // Another poll may have claimed it first.
-      return jsonResponse({ success: true, command: claimed ?? null });
+      if (!claimed) {
+        return jsonResponse({ success: true, command: null });
+      }
+
+      // If it's an unlock command, attach the stored unlock_password so the agent can type it
+      let unlockPassword: string | null = null;
+      if (claimed.action === "unlock") {
+        const { data: deviceRow } = await admin
+          .from("devices")
+          .select("unlock_password")
+          .eq("id", deviceId)
+          .eq("user_id", userId)
+          .maybeSingle();
+        unlockPassword = deviceRow?.unlock_password ?? null;
+      }
+
+      return jsonResponse({
+        success: true,
+        command: claimed,
+        unlock_password: unlockPassword,
+      });
     }
 
     // A device can complete only a command assigned to itself.

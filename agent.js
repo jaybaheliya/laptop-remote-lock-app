@@ -474,26 +474,76 @@ function captureScreen() {
   });
 }
 
-function unlockOrWakeWindows() {
+function unlockOrWakeWindows(unlockPassword) {
   return new Promise((resolve, reject) => {
-    // Wakes display, simulates mouse movement and keypress to dismiss lock screensaver
-    const psScript = `
-      Add-Type -TypeDefinition @'
-      using System;
-      using System.Runtime.InteropServices;
-      public class DisplayWake {
-          [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
-          [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-          public static void Wake() {
-              mouse_event(0x0001, 1, 1, 0, 0);
-              mouse_event(0x0001, -1, -1, 0, 0);
-              keybd_event(0x20, 0, 0, 0);
-              keybd_event(0x20, 0, 2, 0);
-          }
-      }
+    const hasPassword = typeof unlockPassword === "string" && unlockPassword.length > 0;
+
+    // Escape the password for safe embedding in a PowerShell double-quoted string:
+    // escape $, ", `, and backslash
+    const escapedPassword = hasPassword
+      ? unlockPassword
+          .replace(/`/g, "``")
+          .replace(/\$/g, "`\$")
+          .replace(/"/g, '`"')
+          .replace(/\\/g, "\\\\")
+      : "";
+
+    const psScript = hasPassword
+      ? `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public class WinUnlock {
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    public static void Wake() {
+        // Move mouse to wake display
+        mouse_event(0x0001, 5, 5, 0, 0);
+        mouse_event(0x0001, -5, -5, 0, 0);
+        Thread.Sleep(800);
+        // Press Space to dismiss the lock screen clock overlay
+        keybd_event(0x20, 0, 0, 0);   // Space down
+        keybd_event(0x20, 0, 2, 0);   // Space up
+        Thread.Sleep(1200);
+        // Press Escape then Space again to ensure PIN field is focused
+        keybd_event(0x1B, 0, 0, 0);   // Esc down
+        keybd_event(0x1B, 0, 2, 0);   // Esc up
+        Thread.Sleep(400);
+        keybd_event(0x20, 0, 0, 0);   // Space down
+        keybd_event(0x20, 0, 2, 0);   // Space up
+        Thread.Sleep(800);
+    }
+}
 '@
-      [DisplayWake]::Wake()
-    `;
+[WinUnlock]::Wake()
+# Type the password character by character using SendKeys
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait("${escapedPassword}")
+Start-Sleep -Milliseconds 400
+[System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+`
+      : `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public class WinWake {
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+    public static void Wake() {
+        mouse_event(0x0001, 5, 5, 0, 0);
+        mouse_event(0x0001, -5, -5, 0, 0);
+        Thread.Sleep(500);
+        keybd_event(0x20, 0, 0, 0);
+        keybd_event(0x20, 0, 2, 0);
+    }
+}
+'@
+[WinWake]::Wake()
+`;
 
     const child = spawn(
       "powershell.exe",
@@ -501,9 +551,12 @@ function unlockOrWakeWindows() {
       { shell: false, windowsHide: true }
     );
 
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+
     child.once("close", (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`Wake command exited with code ${code}`));
+      else reject(new Error(`Wake/unlock command exited with code ${code}: ${stderr.trim()}`));
     });
     child.once("error", reject);
   });
@@ -569,6 +622,8 @@ async function pollOnce() {
     const battery = await getBatteryStatus();
     const result = await callAgentPoll({ action: "poll", battery });
     const command = result.command;
+    // unlock_password is returned by agent-poll when action === "unlock"
+    const unlockPassword = typeof result.unlock_password === "string" ? result.unlock_password : null;
 
     if (!command) return;
 
@@ -632,9 +687,13 @@ async function pollOnce() {
       }
     } else if (action === "unlock") {
       try {
-        console.log("Sending display wake and unlock signal...");
-        await unlockOrWakeWindows();
-        console.log("Display wake signal sent successfully.");
+        if (unlockPassword) {
+          console.log("Sending display wake signal and typing unlock password...");
+        } else {
+          console.log("Sending display wake signal (no password stored — dismissing lock screen only)...");
+        }
+        await unlockOrWakeWindows(unlockPassword);
+        console.log("Display wake/unlock signal sent successfully.");
       } catch (error) {
         status = "failed";
         failureReason =

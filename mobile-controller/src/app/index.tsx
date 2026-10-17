@@ -24,6 +24,7 @@ type Device = {
   battery_level?: number | null;
   is_charging?: boolean | null;
   power_online?: boolean | null;
+  unlock_password?: string | null;
 };
 
 type LockCommand = {
@@ -79,6 +80,11 @@ export default function HomeScreen() {
   const lockSubmitting = actionSubmitting !== null;
   const [latestScreenshot, setLatestScreenshot] = useState<ScreenshotItem | null>(null);
   const [screenshotModalVisible, setScreenshotModalVisible] = useState(false);
+  const [isPasswordModalVisible, setIsPasswordModalVisible] = useState(false);
+  const [unlockPassword, setUnlockPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [savingPassword, setSavingPassword] = useState(false);
+  const [savedPasswordSet, setSavedPasswordSet] = useState(false);
   const [statusError, setStatusError] = useState("");
 
   // Track time in state to comply with React 19 purity rules
@@ -149,7 +155,7 @@ export default function HomeScreen() {
       try {
         const { data, error } = await supabase
           .from("devices")
-          .select("id, name, platform, last_seen_at, battery_level, is_charging, power_online")
+          .select("id, name, platform, last_seen_at, battery_level, is_charging, power_online, unlock_password")
           .eq("user_id", userId)
           .order("created_at", { ascending: false });
 
@@ -384,6 +390,9 @@ export default function HomeScreen() {
       dotColor: "#ef4444",
     };
   };
+
+  // Track whether a password is already saved for this device
+  const deviceHasPassword = !!(device?.unlock_password);
 
   const heartbeat = getHeartbeatState();
   const isCommandActive =
@@ -840,6 +849,31 @@ export default function HomeScreen() {
       fetchCommands(device.id, session.user.id, true),
       fetchScreenshot(device.id, session.user.id),
     ]);
+  }
+
+  async function handleSaveUnlockPassword() {
+    if (!session?.user?.id || !device?.id) return;
+    if (!unlockPassword.trim()) {
+      Alert.alert("No password", "Please enter the Windows password to save.");
+      return;
+    }
+    setSavingPassword(true);
+    try {
+      const { error } = await supabase
+        .from("devices")
+        .update({ unlock_password: unlockPassword })
+        .eq("id", device.id)
+        .eq("user_id", session.user.id);
+      if (error) throw error;
+      setSavedPasswordSet(true);
+      setUnlockPassword("");
+      setIsPasswordModalVisible(false);
+      Alert.alert("✅ Password Saved", "Your Windows password has been saved. The 🔓 WAKE button will now type it automatically after waking your screen.");
+    } catch (err) {
+      Alert.alert("Failed to save", err instanceof Error ? err.message : "Could not save password.");
+    } finally {
+      if (isMountedRef.current) setSavingPassword(false);
+    }
   }
 
   async function handleSignOut() {
@@ -2053,12 +2087,13 @@ const styles = StyleSheet.create({
   lockStationHeader: {
     alignItems: "center",
     marginBottom: 14,
+    width: "100%",
   },
   stationTitle: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: "900",
-    color: "#f43f5e",
-    letterSpacing: 1.2,
+    color: "#f8fafc",
+    letterSpacing: 1,
   },
   stationSub: {
     fontSize: 11,
