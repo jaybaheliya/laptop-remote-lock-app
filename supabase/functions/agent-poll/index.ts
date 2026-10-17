@@ -154,13 +154,13 @@ Deno.serve(async (req: Request) => {
     }
 
     if (body.action === "poll") {
-      // Find the oldest pending lock command for this laptop.
+      // Find the oldest pending command (lock, sleep, shutdown) for this laptop.
       const { data: pending, error: pendingError } = await admin
         .from("commands")
         .select("id, device_id, action, status, created_at")
         .eq("device_id", deviceId)
         .eq("user_id", userId)
-        .eq("action", "lock")
+        .in("action", ["lock", "sleep", "shutdown"])
         .eq("status", "pending")
         .order("created_at", { ascending: true })
         .limit(1)

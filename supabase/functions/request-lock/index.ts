@@ -62,7 +62,7 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Invalid or expired session" }, 401);
   }
 
-  let body: { device_id?: string };
+  let body: { device_id?: string; action?: string };
 
   try {
     body = await req.json();
@@ -71,6 +71,12 @@ Deno.serve(async (req: Request) => {
   }
 
   const deviceId = body?.device_id;
+  const requestedAction = typeof body?.action === "string" ? body.action.trim().toLowerCase() : "lock";
+
+  const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown"];
+  if (!ALLOWED_ACTIONS.includes(requestedAction)) {
+    return jsonResponse({ error: `Invalid action. Allowed: ${ALLOWED_ACTIONS.join(", ")}` }, 400);
+  }
 
   const uuidPattern =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -96,13 +102,13 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Device not found" }, 404);
   }
 
-  // Create a pending lock command under the user's permissions and RLS.
+  // Create a pending command under the user's permissions and RLS.
   const { data: command, error: insertError } = await supabase
     .from("commands")
     .insert({
       device_id: deviceId,
       user_id: user.id,
-      action: "lock",
+      action: requestedAction,
       status: "pending",
     })
     .select("id, device_id, action, status, created_at")
@@ -111,7 +117,7 @@ Deno.serve(async (req: Request) => {
   if (insertError) {
     console.error("Command insert failed:", insertError.message);
     return jsonResponse(
-      { error: "Could not create lock command. Check table permissions." },
+      { error: "Could not create command. Check table permissions." },
       403
     );
   }

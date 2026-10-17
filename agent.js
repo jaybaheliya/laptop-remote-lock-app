@@ -326,6 +326,66 @@ function lockWindows() {
   });
 }
 
+function sleepWindows() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $false, $false)",
+      ],
+      {
+        shell: false,
+        stdio: "ignore",
+        windowsHide: true,
+      }
+    );
+
+    child.once("error", reject);
+
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(`Windows sleep command exited with code ${code}`)
+        );
+      }
+    });
+  });
+}
+
+function shutdownWindows() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "shutdown.exe",
+      ["/s", "/t", "10", "/c", "Remote shutdown requested via Laptop Lock App"],
+      {
+        shell: false,
+        stdio: "ignore",
+        windowsHide: true,
+      }
+    );
+
+    child.once("error", reject);
+
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(`Windows shutdown command exited with code ${code}`)
+        );
+      }
+    });
+  });
+}
+
+const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown"];
+
 async function pollOnce() {
   if (busy || stopped) return;
 
@@ -338,21 +398,22 @@ async function pollOnce() {
     if (!command) return;
 
     if (
-      command.action !== "lock" ||
+      !ALLOWED_ACTIONS.includes(command.action) ||
       command.device_id !== DEVICE_ID
     ) {
       console.error(
-        `Unexpected command received (${command.action} for ${command.device_id}). Expected lock for ${DEVICE_ID}.`
+        `Unexpected command received (${command.action} for ${command.device_id}). Expected one of [${ALLOWED_ACTIONS.join(", ")}] for ${DEVICE_ID}.`
       );
       return;
     }
 
-    console.log("Lock command received:", command.id);
+    const action = command.action;
+    console.log(`Command received: ${action} (${command.id})`);
 
-    // Safe mode: do not lock Windows or change command status.
+    // Safe mode: do not execute action or change command status.
     if (TEST_MODE) {
       console.log(
-        "[SAFE TEST MODE] Command received. Windows will NOT be locked."
+        `[SAFE TEST MODE] Command received (${action}). Windows will NOT perform this action.`
       );
       console.log(
         "[SAFE TEST MODE] Command remains claimed for inspection."
@@ -363,15 +424,44 @@ async function pollOnce() {
     let status = "completed";
     let failureReason = null;
 
-    try {
-      console.log("Locking Windows...");
-      await lockWindows();
-      console.log("Windows lock request sent.");
-    } catch (error) {
-      status = "failed";
-      failureReason =
-        error instanceof Error ? error.message : "Windows lock execution failed";
-      console.error("Could not lock Windows:", failureReason);
+    if (action === "sleep") {
+      // For sleep, we notify Supabase that it was completed BEFORE putting the machine into sleep,
+      // because network adapters suspend immediately upon sleep.
+      try {
+        console.log("Reporting completion before sleep...");
+        await callAgentPoll({
+          action: "complete",
+          command_id: command.id,
+          status: "completed",
+        });
+        console.log("Putting Windows to sleep...");
+        await sleepWindows();
+        return;
+      } catch (error) {
+        status = "failed";
+        failureReason =
+          error instanceof Error ? error.message : "Windows sleep execution failed";
+        console.error("Could not sleep Windows:", failureReason);
+      }
+    } else {
+      try {
+        if (action === "lock") {
+          console.log("Locking Windows...");
+          await lockWindows();
+          console.log("Windows lock request sent.");
+        } else if (action === "shutdown") {
+          console.log("Shutting down Windows in 10 seconds...");
+          await shutdownWindows();
+          console.log("Windows shutdown request scheduled.");
+        } else {
+          throw new Error(`Unsupported action: ${action}`);
+        }
+      } catch (error) {
+        status = "failed";
+        failureReason =
+          error instanceof Error ? error.message : `Windows ${action} execution failed`;
+        console.error(`Could not execute ${action} on Windows:`, failureReason);
+      }
     }
 
     const payload = {

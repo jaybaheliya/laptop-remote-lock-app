@@ -62,7 +62,10 @@ export default function HomeScreen() {
   const [latestCommand, setLatestCommand] = useState<LockCommand | null>(null);
   const [commandHistory, setCommandHistory] = useState<LockCommand[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [lockSubmitting, setLockSubmitting] = useState(false);
+  const [actionSubmitting, setActionSubmitting] = useState<"lock" | "sleep" | "shutdown" | null>(null);
+  const lockSubmitting = actionSubmitting !== null;
+  const [isSleepConfirmVisible, setIsSleepConfirmVisible] = useState(false);
+  const [isShutdownConfirmVisible, setIsShutdownConfirmVisible] = useState(false);
   const [statusError, setStatusError] = useState("");
 
   // Track time in state to comply with React 19 purity rules
@@ -183,7 +186,7 @@ export default function HomeScreen() {
           .select("id, action, status, created_at, failure_reason")
           .eq("device_id", deviceId)
           .eq("user_id", userId)
-          .eq("action", "lock")
+          .in("action", ["lock", "sleep", "shutdown"])
           .order("created_at", { ascending: false })
           .limit(10);
 
@@ -197,7 +200,7 @@ export default function HomeScreen() {
             .select("id, action, status, created_at")
             .eq("device_id", deviceId)
             .eq("user_id", userId)
-            .eq("action", "lock")
+            .in("action", ["lock", "sleep", "shutdown"])
             .order("created_at", { ascending: false })
             .limit(10);
 
@@ -644,11 +647,11 @@ export default function HomeScreen() {
     }
   }
 
-  async function handleLockLaptop() {
+  async function executeRemoteAction(action: "lock" | "sleep" | "shutdown") {
     if (!session?.access_token || !device?.id) {
       Alert.alert(
-        "Unable to lock",
-        "Please sign in and register your laptop first."
+        "Unable to execute command",
+        "Please sign in and select a registered laptop first."
       );
       return;
     }
@@ -656,62 +659,65 @@ export default function HomeScreen() {
     if (isCommandActive) {
       Alert.alert(
         "Command already in progress",
-        "A lock request is currently waiting for or being processed by the Windows agent. Please wait for it to complete."
+        `A command is currently waiting for or being processed by the Windows agent (${latestCommand?.action?.toUpperCase() || "PENDING"}). Please wait for it to complete.`
       );
       return;
     }
 
-    const executeLock = async () => {
-      setLockSubmitting(true);
-      setMessage("");
+    setActionSubmitting(action);
+    setMessage("");
 
-      try {
-        const { data, error } = await supabase.functions.invoke(
-          "request-lock",
-          {
-            body: { device_id: device.id },
-          }
+    try {
+      const { data, error } = await supabase.functions.invoke(
+        "request-lock",
+        {
+          body: { device_id: device.id, action },
+        }
+      );
+
+      if (error) throw error;
+
+      if (!data?.success) {
+        throw new Error(
+          data?.error || `Could not send the ${action} command.`
         );
-
-        if (error) throw error;
-
-        if (!data?.success) {
-          throw new Error(
-            data?.error || "Could not send the lock command."
-          );
-        }
-
-        if (data.command && isMountedRef.current) {
-          const newCmd = data.command as LockCommand;
-          setLatestCommand(newCmd);
-          setCommandHistory((prev) => [newCmd, ...prev.filter((c) => c.id !== newCmd.id)]);
-        }
-
-        if (Platform.OS === "web") {
-          setMessage("Lock command dispatched! Windows workstation will lock shortly.");
-        } else {
-          Alert.alert(
-            "Lock command dispatched",
-            "The command was created securely in Supabase. Your Windows agent will execute it on its next check-in cycle."
-          );
-        }
-
-        void fetchCommands(device.id, session.user.id, false);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : "An unexpected error occurred.";
-        setMessage(errMsg);
-        Alert.alert("Lock request failed", errMsg);
-      } finally {
-        if (isMountedRef.current) setLockSubmitting(false);
       }
-    };
 
+      if (data.command && isMountedRef.current) {
+        const newCmd = data.command as LockCommand;
+        setLatestCommand(newCmd);
+        setCommandHistory((prev) => [newCmd, ...prev.filter((c) => c.id !== newCmd.id)]);
+      }
+
+      const actionSuccessMsg: Record<string, string> = {
+        lock: "Lock command dispatched! Windows workstation will lock shortly.",
+        sleep: "Sleep command dispatched! Windows workstation is entering sleep mode.",
+        shutdown: "Shutdown command dispatched! Windows workstation will shut down in 10 seconds.",
+      };
+
+      const msg = actionSuccessMsg[action] || `${action} dispatched!`;
+      setMessage(msg);
+      if (Platform.OS !== "web") {
+        Alert.alert("Command Dispatched", msg);
+      }
+
+      void fetchCommands(device.id, session.user.id, false);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "An unexpected error occurred.";
+      setMessage(errMsg);
+      Alert.alert(`${action.toUpperCase()} request failed`, errMsg);
+    } finally {
+      if (isMountedRef.current) setActionSubmitting(null);
+    }
+  }
+
+  function handleLockLaptop() {
     if (Platform.OS === "web") {
       if (
         typeof window !== "undefined" &&
         window.confirm("Are you sure you want to lock your Windows laptop workstation now?")
       ) {
-        void executeLock();
+        void executeRemoteAction("lock");
       }
     } else {
       Alert.alert(
@@ -722,11 +728,19 @@ export default function HomeScreen() {
           {
             text: "Lock Workstation",
             style: "destructive",
-            onPress: () => void executeLock(),
+            onPress: () => void executeRemoteAction("lock"),
           },
         ]
       );
     }
+  }
+
+  function handleSleepLaptop() {
+    setIsSleepConfirmVisible(true);
+  }
+
+  function handleShutdownLaptop() {
+    setIsShutdownConfirmVisible(true);
   }
 
   async function handleManualRefresh() {
@@ -997,6 +1011,112 @@ export default function HomeScreen() {
               </View>
             </Modal>
 
+            {/* Sleep Confirmation Modal */}
+            <Modal
+              visible={isSleepConfirmVisible}
+              transparent
+              animationType="fade"
+              onRequestClose={() => setIsSleepConfirmVisible(false)}
+            >
+              <View style={styles.modalOverlay}>
+                <View style={styles.modalCard}>
+                  <View style={styles.modalHeader}>
+                    <Text style={[styles.modalTitle, { color: "#818cf8" }]}>CONFIRM REMOTE SLEEP</Text>
+                    <TouchableOpacity
+                      onPress={() => setIsSleepConfirmVisible(false)}
+                    >
+                      <Text style={styles.modalCloseIcon}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={styles.modalSubtitle}>
+                    Put &quot;{device?.name || "your workstation"}&quot; into low-power sleep mode now? The Windows session will suspend immediately.
+                  </Text>
+
+                  <View style={styles.modalBtnRow}>
+                    <TouchableOpacity
+                      style={styles.modalCancelBtn}
+                      onPress={() => setIsSleepConfirmVisible(false)}
+                    >
+                      <Text style={styles.modalCancelBtnText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.modalConfirmBtn,
+                        { backgroundColor: "#4f46e5" },
+                        actionSubmitting !== null && styles.btnDisabled,
+                      ]}
+                      onPress={() => {
+                        setIsSleepConfirmVisible(false);
+                        void executeRemoteAction("sleep");
+                      }}
+                      disabled={actionSubmitting !== null}
+                    >
+                      <Text style={styles.modalConfirmBtnText}>Sleep PC</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            </Modal>
+
+            {/* Shutdown Confirmation Modal */}
+            <Modal
+              visible={isShutdownConfirmVisible}
+              transparent
+              animationType="fade"
+              onRequestClose={() => setIsShutdownConfirmVisible(false)}
+            >
+              <View style={styles.modalOverlay}>
+                <View style={styles.modalCard}>
+                  <View style={styles.modalHeader}>
+                    <Text style={[styles.modalTitle, { color: "#f43f5e" }]}>⚠️ CONFIRM REMOTE SHUTDOWN</Text>
+                    <TouchableOpacity
+                      onPress={() => setIsShutdownConfirmVisible(false)}
+                    >
+                      <Text style={styles.modalCloseIcon}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={styles.modalSubtitle}>
+                    Are you sure you want to shut down &quot;{device?.name || "your workstation"}&quot;? Windows will close open applications and power off in 10 seconds.
+                  </Text>
+
+                  <View style={[styles.pairingInstructionsBox, { backgroundColor: "rgba(244, 63, 94, 0.08)", borderColor: "rgba(244, 63, 94, 0.25)" }]}>
+                    <Text style={[styles.pairingInstructionsHeader, { color: "#f87171" }]}>IMPORTANT NOTICE:</Text>
+                    <Text style={[styles.pairingInstructionStep, { color: "#cbd5e1" }]}>
+                      • Unsaved files on the workstation may be lost.
+                    </Text>
+                    <Text style={[styles.pairingInstructionStep, { color: "#cbd5e1" }]}>
+                      • Workstation cannot be woken remotely without physical power-on or Wake-on-LAN.
+                    </Text>
+                  </View>
+
+                  <View style={styles.modalBtnRow}>
+                    <TouchableOpacity
+                      style={styles.modalCancelBtn}
+                      onPress={() => setIsShutdownConfirmVisible(false)}
+                    >
+                      <Text style={styles.modalCancelBtnText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.modalConfirmBtn,
+                        { backgroundColor: "#dc2626" },
+                        actionSubmitting !== null && styles.btnDisabled,
+                      ]}
+                      onPress={() => {
+                        setIsShutdownConfirmVisible(false);
+                        void executeRemoteAction("shutdown");
+                      }}
+                      disabled={actionSubmitting !== null}
+                    >
+                      <Text style={styles.modalConfirmBtnText}>Shut Down PC</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            </Modal>
+
             {deviceLoading && !device ? (
               <ActivityIndicator size="small" color="#38bdf8" style={styles.verticalSpacer} />
             ) : device ? (
@@ -1078,24 +1198,24 @@ export default function HomeScreen() {
 
             {device && (
               <>
-                {/* HERO LOCK ACTION STATION */}
+                {/* HERO ACTION STATION */}
                 <View style={styles.lockStationCard}>
                   <View style={styles.lockStationHeader}>
-                    <Text style={styles.stationTitle}>REMOTE LOCK ACTION</Text>
-                    <Text style={styles.stationSub}>Instantly lock workstation session</Text>
+                    <Text style={styles.stationTitle}>REMOTE POWER & SECURITY</Text>
+                    <Text style={styles.stationSub}>Instantly lock session, sleep, or shut down</Text>
                   </View>
 
                   <TouchableOpacity
                     style={[
                       styles.heroLockBtn,
-                      (lockSubmitting || isCommandActive || heartbeat.status === "offline") &&
+                      (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
                         styles.heroLockBtnDisabled,
                     ]}
                     onPress={handleLockLaptop}
-                    disabled={lockSubmitting || isCommandActive}
+                    disabled={actionSubmitting !== null || isCommandActive}
                     activeOpacity={0.8}
                   >
-                    {lockSubmitting ? (
+                    {actionSubmitting === "lock" ? (
                       <ActivityIndicator size="large" color="#ffffff" />
                     ) : isCommandActive ? (
                       <View style={styles.heroLockBtnContent}>
@@ -1112,17 +1232,64 @@ export default function HomeScreen() {
                     )}
                   </TouchableOpacity>
 
+                  {/* Secondary Power Actions: Sleep & Shutdown */}
+                  <View style={styles.powerActionsRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.powerActionBtn,
+                        styles.sleepBtn,
+                        (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
+                          styles.heroLockBtnDisabled,
+                      ]}
+                      onPress={handleSleepLaptop}
+                      disabled={actionSubmitting !== null || isCommandActive}
+                      activeOpacity={0.8}
+                    >
+                      {actionSubmitting === "sleep" ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <>
+                          <Text style={styles.powerActionEmoji}>🌙</Text>
+                          <Text style={styles.powerActionText}>SLEEP</Text>
+                          <Text style={styles.powerActionSub}>Low-power standby</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.powerActionBtn,
+                        styles.shutdownBtn,
+                        (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
+                          styles.heroLockBtnDisabled,
+                      ]}
+                      onPress={handleShutdownLaptop}
+                      disabled={actionSubmitting !== null || isCommandActive}
+                      activeOpacity={0.8}
+                    >
+                      {actionSubmitting === "shutdown" ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <>
+                          <Text style={styles.powerActionEmoji}>⚡</Text>
+                          <Text style={styles.powerActionText}>SHUT DOWN</Text>
+                          <Text style={styles.powerActionSub}>Power off machine</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+
                   {isCommandActive && (
                     <View style={styles.inProgressBanner}>
                       <Text style={styles.inProgressBannerText}>
-                        ⚠️ Command active. Duplicate lock submissions are temporarily locked out.
+                        ⚠️ Command active ({(latestCommand?.action || "COMMAND").toUpperCase()}). Duplicate submissions are temporarily locked out.
                       </Text>
                     </View>
                   )}
 
                   {heartbeat.status === "offline" && !isCommandActive && (
                     <Text style={styles.offlineWarningText}>
-                      Notice: Agent is currently offline. Lock command will queue in pending state until agent resumes.
+                      Notice: Agent is currently offline. Commands will queue in pending state until agent resumes.
                     </Text>
                   )}
                 </View>
@@ -1160,13 +1327,13 @@ export default function HomeScreen() {
                               latestCommand.status === "pending" && styles.pillTextPending,
                             ]}
                           >
-                            {latestCommand.status === "completed"
-                              ? "✓ LOCK COMPLETED"
-                              : latestCommand.status === "failed"
-                              ? "✕ LOCK FAILED"
-                              : latestCommand.status === "claimed"
-                              ? "● IN PROGRESS (CLAIMED)"
-                              : "◷ PENDING EXECUTION"}
+                            {(() => {
+                              const act = (latestCommand.action || "lock").toUpperCase();
+                              if (latestCommand.status === "completed") return `✓ ${act} COMPLETED`;
+                              if (latestCommand.status === "failed") return `✕ ${act} FAILED`;
+                              if (latestCommand.status === "claimed") return `● ${act} IN PROGRESS`;
+                              return `◷ ${act} PENDING`;
+                            })()}
                           </Text>
                         </View>
 
@@ -1175,7 +1342,7 @@ export default function HomeScreen() {
 
                       {latestCommand.status === "claimed" && (
                         <Text style={styles.commandNote}>
-                          Agent received the lock dispatch. Windows workstation is executing the command.
+                          Agent received the {(latestCommand.action || "remote").toLowerCase()} dispatch. Windows workstation is executing the command.
                         </Text>
                       )}
 
@@ -1193,7 +1360,7 @@ export default function HomeScreen() {
                       )}
                     </View>
                   ) : (
-                    <Text style={styles.emptyFeedText}>No lock commands dispatched yet.</Text>
+                    <Text style={styles.emptyFeedText}>No remote commands dispatched yet.</Text>
                   )}
 
                   {!!statusError && <Text style={styles.errorBannerText}>{statusError}</Text>}
@@ -1226,13 +1393,14 @@ export default function HomeScreen() {
                           />
                           <View>
                             <Text style={styles.historyActionName}>
-                              {cmd.status === "completed"
-                                ? "Lock Executed"
-                                : cmd.status === "failed"
-                                ? "Lock Aborted"
-                                : cmd.status === "claimed"
-                                ? "Command In Progress"
-                                : "Pending Dispatch"}
+                              {(() => {
+                                const act = (cmd.action || "lock").toLowerCase();
+                                const label = act === "sleep" ? "Sleep" : act === "shutdown" ? "Shutdown" : "Lock";
+                                if (cmd.status === "completed") return `${label} Executed`;
+                                if (cmd.status === "failed") return `${label} Failed`;
+                                if (cmd.status === "claimed") return `${label} In Progress`;
+                                return `${label} Pending`;
+                              })()}
                             </Text>
                             <Text style={styles.historyTimestamp}>
                               {formatTimestamp(cmd.created_at)}
@@ -1716,6 +1884,50 @@ const styles = StyleSheet.create({
   heroLockBtnSub: {
     color: "rgba(255, 255, 255, 0.75)",
     fontSize: 11,
+    marginTop: 2,
+    fontWeight: "500",
+  },
+  powerActionsRow: {
+    flexDirection: "row",
+    gap: 10,
+    width: "100%",
+    marginTop: 12,
+  },
+  powerActionBtn: {
+    flex: 1,
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    ...Platform.select({
+      web: {
+        cursor: "pointer",
+      },
+    }),
+  },
+  sleepBtn: {
+    backgroundColor: "rgba(99, 102, 241, 0.15)",
+    borderColor: "rgba(99, 102, 241, 0.35)",
+  },
+  shutdownBtn: {
+    backgroundColor: "rgba(239, 68, 68, 0.12)",
+    borderColor: "rgba(239, 68, 68, 0.3)",
+  },
+  powerActionEmoji: {
+    fontSize: 20,
+    marginBottom: 4,
+  },
+  powerActionText: {
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  powerActionSub: {
+    color: "#94a3b8",
+    fontSize: 10,
     marginTop: 2,
     fontWeight: "500",
   },
