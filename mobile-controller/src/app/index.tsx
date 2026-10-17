@@ -64,8 +64,6 @@ export default function HomeScreen() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [actionSubmitting, setActionSubmitting] = useState<"lock" | "sleep" | "shutdown" | null>(null);
   const lockSubmitting = actionSubmitting !== null;
-  const [isSleepConfirmVisible, setIsSleepConfirmVisible] = useState(false);
-  const [isShutdownConfirmVisible, setIsShutdownConfirmVisible] = useState(false);
   const [statusError, setStatusError] = useState("");
 
   // Track time in state to comply with React 19 purity rules
@@ -736,11 +734,55 @@ export default function HomeScreen() {
   }
 
   function handleSleepLaptop() {
-    setIsSleepConfirmVisible(true);
+    if (Platform.OS === "web") {
+      if (
+        typeof window !== "undefined" &&
+        window.confirm(
+          `Put "${device?.name || "your workstation"}" into low-power sleep mode now?\n\nThe Windows session will suspend immediately.`
+        )
+      ) {
+        void executeRemoteAction("sleep");
+      }
+    } else {
+      Alert.alert(
+        "Confirm Remote Sleep",
+        `Put "${device?.name || "your workstation"}" into low-power sleep mode now? The Windows session will suspend immediately.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Sleep PC",
+            style: "default",
+            onPress: () => void executeRemoteAction("sleep"),
+          },
+        ]
+      );
+    }
   }
 
   function handleShutdownLaptop() {
-    setIsShutdownConfirmVisible(true);
+    if (Platform.OS === "web") {
+      if (
+        typeof window !== "undefined" &&
+        window.confirm(
+          `⚠️ WARNING: Are you sure you want to SHUT DOWN "${device?.name || "your workstation"}"?\n\n• Windows will close open applications and power off in 10 seconds.\n• Unsaved work may be lost.\n• You will not be able to connect remotely until someone powers the PC back on.`
+        )
+      ) {
+        void executeRemoteAction("shutdown");
+      }
+    } else {
+      Alert.alert(
+        "⚠️ Confirm Remote Shutdown",
+        `Are you sure you want to shut down "${device?.name || "your workstation"}"?\n\nWindows will power off in 10 seconds. Unsaved work may be lost, and the PC cannot be woken remotely without physical power-on.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Shut Down PC",
+            style: "destructive",
+            onPress: () => void executeRemoteAction("shutdown"),
+          },
+        ]
+      );
+    }
   }
 
   async function handleManualRefresh() {
@@ -1007,112 +1049,6 @@ export default function HomeScreen() {
                   >
                     <Text style={styles.modalDoneBtnText}>Done</Text>
                   </TouchableOpacity>
-                </View>
-              </View>
-            </Modal>
-
-            {/* Sleep Confirmation Modal */}
-            <Modal
-              visible={isSleepConfirmVisible}
-              transparent
-              animationType="fade"
-              onRequestClose={() => setIsSleepConfirmVisible(false)}
-            >
-              <View style={styles.modalOverlay}>
-                <View style={styles.modalCard}>
-                  <View style={styles.modalHeader}>
-                    <Text style={[styles.modalTitle, { color: "#818cf8" }]}>CONFIRM REMOTE SLEEP</Text>
-                    <TouchableOpacity
-                      onPress={() => setIsSleepConfirmVisible(false)}
-                    >
-                      <Text style={styles.modalCloseIcon}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  <Text style={styles.modalSubtitle}>
-                    Put &quot;{device?.name || "your workstation"}&quot; into low-power sleep mode now? The Windows session will suspend immediately.
-                  </Text>
-
-                  <View style={styles.modalBtnRow}>
-                    <TouchableOpacity
-                      style={styles.modalCancelBtn}
-                      onPress={() => setIsSleepConfirmVisible(false)}
-                    >
-                      <Text style={styles.modalCancelBtnText}>Cancel</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        styles.modalConfirmBtn,
-                        { backgroundColor: "#4f46e5" },
-                        actionSubmitting !== null && styles.btnDisabled,
-                      ]}
-                      onPress={() => {
-                        setIsSleepConfirmVisible(false);
-                        void executeRemoteAction("sleep");
-                      }}
-                      disabled={actionSubmitting !== null}
-                    >
-                      <Text style={styles.modalConfirmBtnText}>Sleep PC</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </View>
-            </Modal>
-
-            {/* Shutdown Confirmation Modal */}
-            <Modal
-              visible={isShutdownConfirmVisible}
-              transparent
-              animationType="fade"
-              onRequestClose={() => setIsShutdownConfirmVisible(false)}
-            >
-              <View style={styles.modalOverlay}>
-                <View style={styles.modalCard}>
-                  <View style={styles.modalHeader}>
-                    <Text style={[styles.modalTitle, { color: "#f43f5e" }]}>⚠️ CONFIRM REMOTE SHUTDOWN</Text>
-                    <TouchableOpacity
-                      onPress={() => setIsShutdownConfirmVisible(false)}
-                    >
-                      <Text style={styles.modalCloseIcon}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  <Text style={styles.modalSubtitle}>
-                    Are you sure you want to shut down &quot;{device?.name || "your workstation"}&quot;? Windows will close open applications and power off in 10 seconds.
-                  </Text>
-
-                  <View style={[styles.pairingInstructionsBox, { backgroundColor: "rgba(244, 63, 94, 0.08)", borderColor: "rgba(244, 63, 94, 0.25)" }]}>
-                    <Text style={[styles.pairingInstructionsHeader, { color: "#f87171" }]}>IMPORTANT NOTICE:</Text>
-                    <Text style={[styles.pairingInstructionStep, { color: "#cbd5e1" }]}>
-                      • Unsaved files on the workstation may be lost.
-                    </Text>
-                    <Text style={[styles.pairingInstructionStep, { color: "#cbd5e1" }]}>
-                      • Workstation cannot be woken remotely without physical power-on or Wake-on-LAN.
-                    </Text>
-                  </View>
-
-                  <View style={styles.modalBtnRow}>
-                    <TouchableOpacity
-                      style={styles.modalCancelBtn}
-                      onPress={() => setIsShutdownConfirmVisible(false)}
-                    >
-                      <Text style={styles.modalCancelBtnText}>Cancel</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        styles.modalConfirmBtn,
-                        { backgroundColor: "#dc2626" },
-                        actionSubmitting !== null && styles.btnDisabled,
-                      ]}
-                      onPress={() => {
-                        setIsShutdownConfirmVisible(false);
-                        void executeRemoteAction("shutdown");
-                      }}
-                      disabled={actionSubmitting !== null}
-                    >
-                      <Text style={styles.modalConfirmBtnText}>Shut Down PC</Text>
-                    </TouchableOpacity>
-                  </View>
                 </View>
               </View>
             </Modal>
