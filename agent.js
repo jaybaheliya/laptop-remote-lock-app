@@ -581,28 +581,36 @@ public class WinSendInputUnlocker {
     }
 
     public static void Unlock(string password) {
-        // Step 1: Wake display hardware from standby with mouse movement
-        mouse_event(0x0001, 20, 20, 0, 0);
+        // Step 1: Wake display hardware from standby with gentle mouse movement
+        mouse_event(0x0001, 30, 30, 0, 0);
+        Thread.Sleep(80);
+        mouse_event(0x0001, -30, -30, 0, 0);
+        Thread.Sleep(800); // Ensure monitor panel has power
+
+        // Step 2: Click center of screen to dismiss lock curtain safely (NEVER press Space/Enter which can hit Power button)
+        mouse_event(0x8000 | 0x0001, 32768, 32768, 0, 0); // Move to 50%, 50%
         Thread.Sleep(100);
-        mouse_event(0x0001, -20, -20, 0, 0);
-        Thread.Sleep(1000); // 1000ms ensures monitor panel has powered on
+        mouse_event(0x0002, 0, 0, 0, 0); // Left down
+        Thread.Sleep(50);
+        mouse_event(0x0004, 0, 0, 0, 0); // Left up
+        Thread.Sleep(1200); // Wait for lock screen curtain animation to slide up
 
-        // Step 2: Dismiss lock screen clock curtain (Spacebar)
-        SendKey(0x20); // Spacebar lifts curtain
-        Thread.Sleep(1200); // Wait for slide-up animation
+        // Step 3: Click again at password field area (horizontal center, slightly below vertical center)
+        mouse_event(0x8000 | 0x0001, 32768, 36000, 0, 0);
+        Thread.Sleep(100);
+        mouse_event(0x0002, 0, 0, 0, 0); // Left down
+        Thread.Sleep(50);
+        mouse_event(0x0004, 0, 0, 0, 0); // Left up
+        Thread.Sleep(400);
 
-        // Step 3: Enter key to ensure credential input field receives focus
-        SendKey(0x0D);
-        Thread.Sleep(800);
-
-        // Step 4: Type password characters cleanly via Unicode (immune to keyboard layouts)
+        // Step 4: Type password characters cleanly via Unicode
         if (!string.IsNullOrEmpty(password)) {
             foreach (char c in password) {
                 SendUnicode(c);
             }
-            Thread.Sleep(500);
+            Thread.Sleep(400);
 
-            // Step 5: Submit password/PIN
+            // Step 5: Submit password with Enter
             SendKey(0x0D);
         }
     }
