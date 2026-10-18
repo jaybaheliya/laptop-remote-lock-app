@@ -34,8 +34,10 @@ if not exist "%NODE_EXE%" (
     )
 )
 
-:: Launch system tray notification icon (if not already running)
-if exist "%APP_DIR%\app\tray.ps1" (
+:: Launch native system tray notification icon (if present and not already running)
+if exist "%APP_DIR%\app\LaptopLockAgentTray.exe" (
+    start "" "%APP_DIR%\app\LaptopLockAgentTray.exe"
+) else if exist "%APP_DIR%\app\tray.ps1" (
     start "" /b powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%APP_DIR%\app\tray.ps1"
 )
 

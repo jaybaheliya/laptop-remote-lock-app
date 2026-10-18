@@ -28,6 +28,7 @@ SetupIconFile=..\app_icon.ico
 [Files]
 ; Agent logic script and system tray
 Source: "..\agent.js"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "..\LaptopLockAgentTray.exe"; DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\tray.ps1"; DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\app_icon.ico"; DestDir: "{app}\app"; Flags: ignoreversion
 ; Runner scripts
