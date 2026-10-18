@@ -536,7 +536,6 @@ public class WinSendInputUnlocker {
 
     public static void SendKey(ushort vk) {
         byte scan = (byte)MapVirtualKey(vk, 0);
-
         int inputSize = Marshal.SizeOf(typeof(INPUT));
         INPUT[] inputs = new INPUT[2];
 
@@ -550,83 +549,60 @@ public class WinSendInputUnlocker {
         inputs[1].ki.wScan = scan;
         inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
 
-        // Dual dispatch: SendInput (modern) + keybd_event (legacy Winlogon fallback)
+        // Clean single dispatch via modern SendInput
         SendInput(1, new INPUT[] { inputs[0] }, inputSize);
-        keybd_event((byte)vk, scan, 0, 0);
-        Thread.Sleep(50);
+        Thread.Sleep(40);
         SendInput(1, new INPUT[] { inputs[1] }, inputSize);
-        keybd_event((byte)vk, scan, KEYEVENTF_KEYUP, 0);
-        Thread.Sleep(50);
+        Thread.Sleep(40);
     }
 
     public static void SendUnicode(char c) {
         int inputSize = Marshal.SizeOf(typeof(INPUT));
-        INPUT[] inputs = new INPUT[2];
+        INPUT[] down = new INPUT[1];
+        down[0].type = INPUT_KEYBOARD;
+        down[0].ki.wVk = 0;
+        down[0].ki.wScan = (ushort)c;
+        down[0].ki.dwFlags = KEYEVENTF_UNICODE;
 
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].ki.wVk = 0;
-        inputs[0].ki.wScan = (ushort)c;
-        inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
+        INPUT[] up = new INPUT[1];
+        up[0].type = INPUT_KEYBOARD;
+        up[0].ki.wVk = 0;
+        up[0].ki.wScan = (ushort)c;
+        up[0].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
 
-        inputs[1].type = INPUT_KEYBOARD;
-        inputs[1].ki.wVk = 0;
-        inputs[1].ki.wScan = (ushort)c;
-        inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-
-        SendInput(1, new INPUT[] { inputs[0] }, inputSize);
-        Thread.Sleep(50);
-        SendInput(1, new INPUT[] { inputs[1] }, inputSize);
-        Thread.Sleep(50);
+        SendInput(1, down, inputSize);
+        Thread.Sleep(40);
+        SendInput(1, up, inputSize);
+        Thread.Sleep(60);
     }
 
     public static void SendChar(char c) {
-        short scanResult = VkKeyScan(c);
-        if (scanResult == -1) {
-            SendUnicode(c);
-            return;
-        }
-
-        byte vk = (byte)(scanResult & 0xFF);
-        int shiftState = (scanResult >> 8) & 0xFF;
-        bool needShift = (shiftState & 1) != 0;
-
-        if (needShift) {
-            byte shiftScan = (byte)MapVirtualKey(0x10, 0);
-            keybd_event(0x10, shiftScan, 0, 0);
-            Thread.Sleep(30);
-        }
-
-        SendKey(vk);
-
-        if (needShift) {
-            byte shiftScan = (byte)MapVirtualKey(0x10, 0);
-            keybd_event(0x10, shiftScan, KEYEVENTF_KEYUP, 0);
-            Thread.Sleep(30);
-        }
+        SendUnicode(c);
     }
 
     public static void Unlock(string password) {
-        // Step 1: Wake display with mouse movement
-        mouse_event(0x0001, 30, 30, 0, 0);
-        Thread.Sleep(80);
-        mouse_event(0x0001, -30, -30, 0, 0);
-        Thread.Sleep(500);
+        // Step 1: Wake display hardware from standby with mouse movement
+        mouse_event(0x0001, 20, 20, 0, 0);
+        Thread.Sleep(100);
+        mouse_event(0x0001, -20, -20, 0, 0);
+        Thread.Sleep(1000); // 1000ms ensures monitor panel has powered on
 
-        // Step 2: Dismiss lock screen clock curtain by sending Space then Enter
-        SendKey(0x20); // Spacebar to trigger slide-up
-        Thread.Sleep(200);
-        SendKey(0x0D); // Enter to focus PIN credential field
-        Thread.Sleep(2000); // 2000ms gives Windows 11 full time to finish animation and activate field
+        // Step 2: Dismiss lock screen clock curtain (Spacebar)
+        SendKey(0x20); // Spacebar lifts curtain
+        Thread.Sleep(1200); // Wait for slide-up animation
 
-        // Step 3: Type password characters (do NOT send backspaces)
+        // Step 3: Enter key to ensure credential input field receives focus
+        SendKey(0x0D);
+        Thread.Sleep(800);
+
+        // Step 4: Type password characters cleanly via Unicode (immune to keyboard layouts)
         if (!string.IsNullOrEmpty(password)) {
             foreach (char c in password) {
-                SendChar(c);
-                Thread.Sleep(85); // 85ms spacing between characters
+                SendUnicode(c);
             }
             Thread.Sleep(500);
 
-            // Step 4: Submit password
+            // Step 5: Submit password/PIN
             SendKey(0x0D);
         }
     }
