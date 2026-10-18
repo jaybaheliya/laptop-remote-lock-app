@@ -31,8 +31,8 @@ Source: "..\agent.js"; DestDir: "{app}\app"; Flags: ignoreversion
 ; Runner scripts
 Source: "runner\start-agent.bat"; DestDir: "{app}\runner"; Flags: ignoreversion
 Source: "runner\start-agent-hidden.vbs"; DestDir: "{app}\runner"; Flags: ignoreversion
-; Portable Node runtime (User places node.exe into installer\bin\ before compiling)
-; Source: "bin\node.exe"; DestDir: "{app}\bin"; Flags: ignoreversion skipifsourcedoesntexist
+; Portable Node runtime (Embedded if bin\node.exe is present)
+Source: "bin\node.exe"; DestDir: "{app}\bin"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"

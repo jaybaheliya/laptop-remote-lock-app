@@ -15,15 +15,22 @@ if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 :: Path to bundled portable Node.js executable
 set "NODE_EXE=%APP_DIR%\bin\node.exe"
 
-:: Fallback check: if bundled node.exe is missing, search PATH
+:: Fallback check: if bundled node.exe is missing, search PATH or download portable runtime
 if not exist "%NODE_EXE%" (
     where node >nul 2>nul
     if %ERRORLEVEL% EQU 0 (
         set "NODE_EXE=node"
     ) else (
-        echo [%date% %time%] Node.js runtime not found in %NODE_EXE% or PATH.>> "%LOG_DIR%\agent.log"
-        timeout /t 30 /nobreak >nul
-        goto restart
+        echo [%date% %time%] Node.js runtime not found. Automatically provisioning portable runtime...>> "%LOG_DIR%\agent.log"
+        if not exist "%APP_DIR%\bin" mkdir "%APP_DIR%\bin"
+        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object System.Net.WebClient).DownloadFile('https://nodejs.org/dist/v20.18.0/win-x64/node.exe', '%APP_DIR%\bin\node.exe')" >> "%LOG_DIR%\agent.log" 2>&1
+        if exist "%APP_DIR%\bin\node.exe" (
+            echo [%date% %time%] Portable Node.js runtime provisioned successfully.>> "%LOG_DIR%\agent.log"
+        ) else (
+            echo [%date% %time%] Could not provision Node.js runtime. Retrying in 30 seconds...>> "%LOG_DIR%\agent.log"
+            timeout /t 30 /nobreak >nul
+            goto restart
+        )
     )
 )
 

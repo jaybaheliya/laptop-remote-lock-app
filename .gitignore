@@ -15,3 +15,4 @@ logs/
 # Dependencies & build outputs
 node_modules/
 dist/
+installer/bin/
