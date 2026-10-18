@@ -67,3 +67,4 @@ $notifyIcon.ContextMenuStrip = $contextMenu
 
 # Keep Windows Forms message pump running
 [System.Windows.Forms.Application]::Run()
+
