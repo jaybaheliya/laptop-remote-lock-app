@@ -3097,24 +3097,25 @@ const styles = StyleSheet.create({
   },
   screenshotHeader: {
     flexDirection: "row",
-    flexWrap: "wrap",
     justifyContent: "space-between",
     alignItems: "center",
-    gap: 6,
     marginBottom: 12,
     width: "100%",
+    gap: 8,
   },
   screenshotHeaderTitleRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    flexShrink: 1,
+    flex: 1,
+    minWidth: 0,
   },
   screenshotCardTitle: {
     fontSize: 11,
     fontWeight: "900",
     color: "#94a3b8",
     letterSpacing: 0.5,
+    flexShrink: 1,
   },
   refreshScreenshotBtn: {
     backgroundColor: "rgba(56, 189, 248, 0.15)",

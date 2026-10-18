@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
+const net = require("node:net");
 const { spawn } = require("node:child_process");
 
 if (process.platform !== "win32") {
@@ -216,27 +217,28 @@ function reloadConfigIfChanged() {
   }
 }
 
-// Single-instance enforcement: ensure only one agent process runs at a time
-function acquirePidLock() {
-  if (fs.existsSync(PID_FILE)) {
-    try {
-      const existingPid = parseInt(fs.readFileSync(PID_FILE, "utf8").trim(), 10);
-      if (!isNaN(existingPid) && existingPid !== process.pid) {
-        try {
-          process.kill(existingPid, 0);
-          console.log(
-            `Another agent instance is already running (PID: ${existingPid}). Exiting duplicate process.`
-          );
-          process.exit(0);
-        } catch {
-          console.log(`Clearing stale PID file from previous PID ${existingPid}.`);
-        }
+// Single-instance enforcement: atomic Windows Named Pipe lock (immune to PID recycling)
+let instanceServer = null;
+
+function enforceSingleInstance() {
+  const pipeName = "\\\\.\\pipe\\laptop-lock-agent-v1-lock";
+  try {
+    instanceServer = net.createServer();
+    instanceServer.once("error", (err) => {
+      if (err.code === "EADDRINUSE") {
+        console.log("[INSTANCE] Another active agent instance is running. Exiting duplicate process.");
+        process.exit(0);
       }
-    } catch {
-      // Ignore read errors
-    }
+    });
+
+    instanceServer.listen(pipeName, () => {
+      instanceServer.unref();
+    });
+  } catch (err) {
+    console.warn("[INSTANCE] Named pipe check skipped:", err.message);
   }
 
+  // Record PID file for administrative / task-manager visibility
   try {
     fs.writeFileSync(PID_FILE, String(process.pid), "utf8");
   } catch (err) {
@@ -244,8 +246,12 @@ function acquirePidLock() {
   }
 }
 
-function releasePidLock() {
+function releaseSingleInstance() {
   try {
+    if (instanceServer) {
+      instanceServer.close();
+      instanceServer = null;
+    }
     if (fs.existsSync(PID_FILE)) {
       const current = fs.readFileSync(PID_FILE, "utf8").trim();
       if (current === String(process.pid)) {
@@ -257,9 +263,10 @@ function releasePidLock() {
   }
 }
 
-acquirePidLock();
+enforceSingleInstance();
 
 let busy = false;
+let busySince = 0;
 let stopped = false;
 let consecutiveAuthErrors = 0;
 
@@ -286,14 +293,10 @@ async function callAgentPoll(body) {
   if (!response.ok) {
     if (response.status === 401) {
       consecutiveAuthErrors++;
-      // If the token was revoked or deleted on the dashboard, check disk for updated config
       reloadConfigIfChanged();
-      // If 3 consecutive 401 errors occur and config hasn't changed on disk,
-      // exit so start-agent.bat restarts cleanly and reloads
-      if (consecutiveAuthErrors >= 3) {
-        console.error("Device token rejected (401). Exiting so supervisor can reload fresh credentials.");
-        process.exit(1);
-      }
+      console.warn(`[AUTH] Device token authentication returned 401 (attempt ${consecutiveAuthErrors}). Backing off before retry.`);
+      // Prevent rapid hammering if credentials are being rotated
+      await new Promise((r) => setTimeout(r, Math.min(30000, consecutiveAuthErrors * 5000)));
     }
     throw new Error(
       `Agent API returned HTTP ${response.status}: ${
@@ -856,6 +859,7 @@ async function pollOnce() {
     console.error("Agent connection error:", error.message);
   } finally {
     busy = false;
+    busySince = 0;
   }
 }
 
@@ -863,7 +867,6 @@ console.log("Laptop agent started.");
 console.log("Config Mode:", config.isLegacy ? "Legacy (.agent-token)" : `Custom (${config.configDir})`);
 console.log("Device:", DEVICE_ID);
 console.log("Process PID:", process.pid);
-console.log(`PID Lock File: ${PID_FILE}`);
 console.log(`Polling interval: ${POLL_INTERVAL_MS / 1000} seconds.`);
 console.log("Safe test mode:", TEST_MODE ? "ON" : "OFF");
 
@@ -877,15 +880,57 @@ const timer = setInterval(() => {
   void pollOnce();
 }, POLL_INTERVAL_MS);
 
+// --- POWER RESUME & DEADLOCK WATCHDOG ---
+let lastHeartbeatTick = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const elapsed = now - lastHeartbeatTick;
+  lastHeartbeatTick = now;
+
+  // Normal interval is 1000ms. If elapsed > 4000ms, the system was suspended / in sleep!
+  if (elapsed > 4000) {
+    console.log(`[POWER RESUME] System woke from sleep (suspended for ${Math.round(elapsed / 1000)}s).`);
+    busy = false;
+    busySince = 0;
+    consecutiveAuthErrors = 0;
+    // Allow 2.5s for WiFi to re-associate, then poll immediately
+    setTimeout(() => {
+      console.log("[POWER RESUME] Triggering immediate poll after sleep.");
+      void pollOnce();
+    }, 2500);
+  }
+
+  // Deadlock watchdog: If busy has been true for > 25 seconds, clear the freeze
+  if (busy && busySince > 0 && now - busySince > 25000) {
+    console.warn("[WATCHDOG] Polling cycle deadlocked for >25s. Forcing reset.");
+    busy = false;
+    busySince = 0;
+    void pollOnce();
+  }
+}, 1000).unref();
+
+// Global process exception guards so agent never crashes
+process.on("uncaughtException", (err) => {
+  console.error("[CRITICAL UNCAUGHT EXCEPTION]", err.message);
+  busy = false;
+  busySince = 0;
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[CRITICAL UNHANDLED REJECTION]", reason);
+  busy = false;
+  busySince = 0;
+});
+
 function shutdown() {
   if (stopped) return;
 
   stopped = true;
   clearInterval(timer);
-  releasePidLock();
+  releaseSingleInstance();
   console.log("Laptop agent stopped.");
 }
 
-process.once("exit", releasePidLock);
+process.once("exit", releaseSingleInstance);
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
