@@ -23,11 +23,13 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName={#MyAppName}
-CloseApplications=yes
+SetupIconFile=..\app_icon.ico
 
 [Files]
-; Agent logic script
+; Agent logic script and system tray
 Source: "..\agent.js"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "..\tray.ps1"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "..\app_icon.ico"; DestDir: "{app}\app"; Flags: ignoreversion
 ; Runner scripts
 Source: "runner\start-agent.bat"; DestDir: "{app}\runner"; Flags: ignoreversion
 Source: "runner\start-agent-hidden.vbs"; DestDir: "{app}\runner"; Flags: ignoreversion

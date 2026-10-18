@@ -34,6 +34,11 @@ if not exist "%NODE_EXE%" (
     )
 )
 
+:: Launch system tray notification icon (if not already running)
+if exist "%APP_DIR%\app\tray.ps1" (
+    start "" /b powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%APP_DIR%\app\tray.ps1"
+)
+
 :restart
 :: Log rotation: if agent.log > 5MB (5242880 bytes), rotate to agent.old.log
 if exist "%LOG_DIR%\agent.log" (
