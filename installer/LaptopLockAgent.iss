@@ -36,6 +36,10 @@ Source: "runner\start-agent-hidden.vbs"; DestDir: "{app}\runner"; Flags: ignorev
 
 [Icons]
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{userstartup}\LaptopLockAgent"; Filename: "wscript.exe"; Parameters: """{app}\runner\start-agent-hidden.vbs"""; WorkingDir: "{app}\runner"
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "LaptopLockAgent"; ValueData: """wscript.exe"" ""{app}\runner\start-agent-hidden.vbs"""; Flags: uninsdeletevalue
 
 [Run]
 ; Launch agent immediately upon installation completion
