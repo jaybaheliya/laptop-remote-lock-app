@@ -484,8 +484,9 @@ function captureScreen() {
 
 function getUnlockScriptPath() {
   const scriptPath = path.join(os.tmpdir(), "win_unlock_worker.ps1");
+  // NOTE: Always regenerate the script so fixes take effect immediately after agent update
   const scriptContent = `param([string]$PasswordBase64 = "", [string]$Password = "")
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 if (![string]::IsNullOrEmpty($PasswordBase64)) {
     try {
@@ -499,126 +500,155 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-public class WinSendInputUnlocker {
+public class WinUnlocker2 {
+    // ----- Structs -----
     [StructLayout(LayoutKind.Sequential)]
-    struct KEYBDINPUT {
-        public ushort wVk;
-        public ushort wScan;
-        public uint dwFlags;
-        public uint time;
+    public struct MOUSEINPUT {
+        public int dx, dy;
+        public uint mouseData, dwFlags, time;
         public IntPtr dwExtraInfo;
     }
-
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT {
+        public ushort wVk, wScan;
+        public uint dwFlags, time;
+        public IntPtr dwExtraInfo;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct HARDWAREINPUT {
+        public uint uMsg;
+        public ushort wParamL, wParamH;
+    }
     [StructLayout(LayoutKind.Explicit)]
-    struct INPUT {
+    public struct INPUT {
         [FieldOffset(0)] public uint type;
-        [FieldOffset(8)] public KEYBDINPUT ki;
+        [FieldOffset(4)] public MOUSEINPUT mi;
+        [FieldOffset(4)] public KEYBDINPUT ki;
+        [FieldOffset(4)] public HARDWAREINPUT hi;
     }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
+    // ----- P/Invokes -----
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern uint SendInput(uint n, INPUT[] inp, int size);
     [DllImport("user32.dll")]
-    static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
-
+    public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")]
-    static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-
+    public static extern int GetSystemMetrics(int nIndex);
     [DllImport("user32.dll")]
-    static extern uint MapVirtualKey(uint uCode, uint uMapType);
+    public static extern uint MapVirtualKey(uint uCode, uint uMapType);
 
-    [DllImport("user32.dll")]
-    static extern short VkKeyScan(char ch);
-
+    // ----- Constants -----
+    const uint INPUT_MOUSE    = 0;
     const uint INPUT_KEYBOARD = 1;
-    const uint KEYEVENTF_KEYUP = 0x0002;
-    const uint KEYEVENTF_UNICODE = 0x0004;
+    const uint MOUSEEVENTF_MOVE       = 0x0001;
+    const uint MOUSEEVENTF_LEFTDOWN   = 0x0002;
+    const uint MOUSEEVENTF_LEFTUP     = 0x0004;
+    const uint MOUSEEVENTF_ABSOLUTE   = 0x8000;
+    const uint KEYEVENTF_KEYUP        = 0x0002;
+    const uint KEYEVENTF_UNICODE      = 0x0004;
 
-    public static void SendKey(ushort vk) {
+    // ----- Helpers -----
+    static int SZ { get { return System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)); } }
+
+    static void MouseMove(int normX, int normY) {
+        INPUT[] inp = new INPUT[1];
+        inp[0].type = INPUT_MOUSE;
+        inp[0].mi.dx = normX;
+        inp[0].mi.dy = normY;
+        inp[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+        SendInput(1, inp, SZ);
+    }
+
+    static void MouseClick(int normX, int normY) {
+        INPUT[] inp = new INPUT[3];
+        inp[0].type = INPUT_MOUSE; inp[0].mi.dx = normX; inp[0].mi.dy = normY;
+        inp[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+        inp[1].type = INPUT_MOUSE; inp[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        inp[2].type = INPUT_MOUSE; inp[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        SendInput(3, inp, SZ);
+    }
+
+    static void SendVKey(ushort vk) {
         byte scan = (byte)MapVirtualKey(vk, 0);
-        int inputSize = Marshal.SizeOf(typeof(INPUT));
-        INPUT[] inputs = new INPUT[2];
-
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].ki.wVk = vk;
-        inputs[0].ki.wScan = scan;
-        inputs[0].ki.dwFlags = 0;
-
-        inputs[1].type = INPUT_KEYBOARD;
-        inputs[1].ki.wVk = vk;
-        inputs[1].ki.wScan = scan;
-        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-
-        // Clean single dispatch via modern SendInput
-        SendInput(1, new INPUT[] { inputs[0] }, inputSize);
-        Thread.Sleep(40);
-        SendInput(1, new INPUT[] { inputs[1] }, inputSize);
-        Thread.Sleep(40);
+        INPUT[] inp = new INPUT[2];
+        inp[0].type = INPUT_KEYBOARD; inp[0].ki.wVk = vk; inp[0].ki.wScan = scan; inp[0].ki.dwFlags = 0;
+        inp[1].type = INPUT_KEYBOARD; inp[1].ki.wVk = vk; inp[1].ki.wScan = scan; inp[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, new INPUT[]{inp[0]}, SZ); Thread.Sleep(30);
+        SendInput(1, new INPUT[]{inp[1]}, SZ); Thread.Sleep(30);
     }
 
-    public static void SendUnicode(char c) {
-        int inputSize = Marshal.SizeOf(typeof(INPUT));
-        INPUT[] down = new INPUT[1];
-        down[0].type = INPUT_KEYBOARD;
-        down[0].ki.wVk = 0;
-        down[0].ki.wScan = (ushort)c;
-        down[0].ki.dwFlags = KEYEVENTF_UNICODE;
-
+    static void SendUnichar(char c) {
+        INPUT[] dn = new INPUT[1];
+        dn[0].type = INPUT_KEYBOARD; dn[0].ki.wVk = 0; dn[0].ki.wScan = (ushort)c;
+        dn[0].ki.dwFlags = KEYEVENTF_UNICODE;
         INPUT[] up = new INPUT[1];
-        up[0].type = INPUT_KEYBOARD;
-        up[0].ki.wVk = 0;
-        up[0].ki.wScan = (ushort)c;
+        up[0].type = INPUT_KEYBOARD; up[0].ki.wVk = 0; up[0].ki.wScan = (ushort)c;
         up[0].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-
-        SendInput(1, down, inputSize);
-        Thread.Sleep(40);
-        SendInput(1, up, inputSize);
-        Thread.Sleep(60);
+        SendInput(1, dn, SZ); Thread.Sleep(30);
+        SendInput(1, up, SZ); Thread.Sleep(50);
     }
 
-    public static void SendChar(char c) {
-        SendUnicode(c);
-    }
-
+    // ----- Main entry -----
     public static void Unlock(string password) {
-        // Step 1: Wake display hardware from standby with gentle mouse movement
-        mouse_event(0x0001, 30, 30, 0, 0);
-        Thread.Sleep(80);
-        mouse_event(0x0001, -30, -30, 0, 0);
-        Thread.Sleep(800); // Ensure monitor panel has power
-
-        // Step 2: Click center of screen to dismiss lock curtain safely (NEVER press Space/Enter which can hit Power button)
-        mouse_event(0x8000 | 0x0001, 32768, 32768, 0, 0); // Move to 50%, 50%
+        // Step 1: Gentle mouse jiggle to wake the display (hardware-level signal)
+        MouseMove(32000, 32000);
         Thread.Sleep(100);
-        mouse_event(0x0002, 0, 0, 0, 0); // Left down
-        Thread.Sleep(50);
-        mouse_event(0x0004, 0, 0, 0, 0); // Left up
-        Thread.Sleep(1200); // Wait for lock screen curtain animation to slide up
-
-        // Step 3: Click again at password field area (horizontal center, slightly below vertical center)
-        mouse_event(0x8000 | 0x0001, 32768, 36000, 0, 0);
+        MouseMove(33000, 33000);
         Thread.Sleep(100);
-        mouse_event(0x0002, 0, 0, 0, 0); // Left down
-        Thread.Sleep(50);
-        mouse_event(0x0004, 0, 0, 0, 0); // Left up
-        Thread.Sleep(400);
+        MouseMove(32000, 32000);
+        Thread.Sleep(1000); // Give monitor time to power on and display to render
 
-        // Step 4: Type password characters cleanly via Unicode
+        // Step 2: Press Escape first to clear any previous state on lock screen
+        SendVKey(0x1B); // VK_ESCAPE
+        Thread.Sleep(300);
+
+        // Step 3: Click the center-ish of the screen to dismiss the Windows "swipe up" overlay
+        // Windows 10/11 lock screen has a photo overlay you must click-dismiss before password box appears
+        MouseClick(32768, 32768); // center
+        Thread.Sleep(200);
+        MouseClick(32768, 28000); // slightly above center (avoid taskbar/user icon area)
+        Thread.Sleep(1500); // Wait for slide-up animation to fully complete
+
+        // Step 4: Click where the password input box appears
+        // On Windows 10/11 the password field sits at roughly 55-60% down the screen.
+        // We click 3 different vertical positions to maximize the chance of hitting it.
+        int screenH = GetSystemMetrics(1); // real pixels
+        int screenW = GetSystemMetrics(0);
+        // Normalized (0-65535): passwordFieldY ~ 60% = 39321
+        MouseClick(32768, 37000); Thread.Sleep(150);
+        MouseClick(32768, 39000); Thread.Sleep(150);
+        MouseClick(32768, 41000); Thread.Sleep(300);
+
         if (!string.IsNullOrEmpty(password)) {
-            foreach (char c in password) {
-                SendUnicode(c);
-            }
-            Thread.Sleep(400);
+            // Step 5: Ctrl+A to select all existing text in the field first (clear any old chars)
+            INPUT[] ctrlDown = new INPUT[1];
+            ctrlDown[0].type = INPUT_KEYBOARD; ctrlDown[0].ki.wVk = 0x11; // VK_CONTROL
+            SendInput(1, ctrlDown, SZ);
+            Thread.Sleep(30);
+            SendVKey(0x41); // 'A'
+            INPUT[] ctrlUp = new INPUT[1];
+            ctrlUp[0].type = INPUT_KEYBOARD; ctrlUp[0].ki.wVk = 0x11;
+            ctrlUp[0].ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, ctrlUp, SZ);
+            Thread.Sleep(100);
 
-            // Step 5: Submit password with Enter
-            SendKey(0x0D);
+            // Step 6: Type password char by char via Unicode SendInput
+            foreach (char c in password) {
+                SendUnichar(c);
+            }
+            Thread.Sleep(300);
+
+            // Step 7: Press Enter to submit
+            SendVKey(0x0D); // VK_RETURN
+            Thread.Sleep(200);
         }
     }
 }
-"@
+"@ -ErrorAction Stop
 
-[WinSendInputUnlocker]::Unlock($Password)
+[WinUnlocker2]::Unlock($Password)
 `;
+  // Always overwrite so latest logic is used
   fs.writeFileSync(scriptPath, scriptContent, "utf8");
   return scriptPath;
 }
@@ -630,12 +660,20 @@ function unlockOrWakeWindows(unlockPassword) {
       const pwdArg = typeof unlockPassword === "string" ? unlockPassword.trim() : "";
       const pwdBase64 = pwdArg ? Buffer.from(pwdArg, "utf8").toString("base64") : "";
 
-      const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath];
+      // IMPORTANT: Do NOT use -NonInteractive and do NOT use windowsHide:true for unlock.
+      // SendInput() requires the process to run on the interactive desktop session.
+      // windowsHide:true or -NonInteractive causes SendInput to go to a hidden window
+      // instead of the actual lock screen — so the clicks and keystrokes never arrive.
+      const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath];
       if (pwdBase64) {
         args.push("-PasswordBase64", pwdBase64);
       }
 
-      const child = spawn("powershell.exe", args, { shell: false, windowsHide: true });
+      const child = spawn("powershell.exe", args, {
+        shell: false,
+        windowsHide: false,  // Must be false so it runs on interactive desktop
+        stdio: ["ignore", "pipe", "pipe"],
+      });
 
       let stdout = "";
       let stderr = "";
@@ -643,10 +681,15 @@ function unlockOrWakeWindows(unlockPassword) {
       child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
       child.once("close", (code) => {
-        if (code === 0 && !stderr.includes("Error") && !stderr.includes("Exception")) {
+        const errText = stderr.trim();
+        // Ignore informational Add-Type warnings, only fail on real errors
+        const hasRealError = errText.length > 0 &&
+          !errText.includes("WARNING:") &&
+          (errText.includes("Exception") || code !== 0);
+        if (!hasRealError) {
           resolve();
         } else {
-          reject(new Error(`Wake/unlock command failed (exit ${code}): ${stderr.trim() || stdout.trim()}`));
+          reject(new Error(`Wake/unlock command failed (exit ${code}): ${errText || stdout.trim()}`));
         }
       });
       child.once("error", reject);
