@@ -126,10 +126,6 @@ function loadConfigFile(filePath, configDir) {
   }
 
   const testMode = typeof parsed.testMode === "boolean" ? parsed.testMode : false;
-  const unlockPassword =
-    typeof parsed.unlockPassword === "string" && parsed.unlockPassword.trim().length > 0
-      ? parsed.unlockPassword.trim()
-      : null;
   let pollIntervalMs = 5000;
   if (
     typeof parsed.pollIntervalMs === "number" &&
@@ -145,7 +141,6 @@ function loadConfigFile(filePath, configDir) {
     supabaseUrl,
     supabasePublishableKey,
     deviceToken: token,
-    unlockPassword,
     testMode,
     pollIntervalMs,
     configDir,
@@ -484,154 +479,35 @@ function captureScreen() {
 
 function getUnlockScriptPath() {
   const scriptPath = path.join(os.tmpdir(), "win_unlock_worker.ps1");
-  // NOTE: Always regenerate the script so fixes take effect immediately after agent update
-  const scriptContent = `param([string]$PasswordBase64 = "", [string]$Password = "")
-$ErrorActionPreference = "Continue"
-
-if (![string]::IsNullOrEmpty($PasswordBase64)) {
-    try {
-        $bytes = [System.Convert]::FromBase64String($PasswordBase64)
-        $Password = [System.Text.Encoding]::UTF8.GetString($bytes)
-    } catch {}
-}
-
-Add-Type -TypeDefinition @"
+  const scriptContent = `Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
-
-public class WinUnlockerV3 {
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-
+public static class DisplayWaker {
     [DllImport("user32.dll")]
-    public static extern uint MapVirtualKey(uint uCode, uint uMapType);
-
-    [DllImport("user32.dll")]
-    public static extern short VkKeyScan(char ch);
-
-    const uint MOUSEEVENTF_MOVE = 0x0001;
-    const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
-
-    const uint KEYEVENTF_KEYDOWN = 0x0000;
-    const uint KEYEVENTF_KEYUP = 0x0002;
-
-    public static void PressKey(byte vk) {
-        byte scan = (byte)MapVirtualKey(vk, 0);
-        keybd_event(vk, scan, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
-        Thread.Sleep(35);
-        keybd_event(vk, scan, KEYEVENTF_KEYUP, UIntPtr.Zero);
-        Thread.Sleep(45);
-    }
-
-    public static void SendChar(char c) {
-        short vkScan = VkKeyScan(c);
-        byte vk = (byte)(vkScan & 0xFF);
-        byte shift = (byte)((vkScan >> 8) & 0xFF);
-
-        if ((shift & 1) != 0) {
-            keybd_event(0x10, 0x2A, KEYEVENTF_KEYDOWN, UIntPtr.Zero); // VK_SHIFT down
-            Thread.Sleep(25);
-        }
-
-        byte scan = (byte)MapVirtualKey(vk, 0);
-        keybd_event(vk, scan, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
-        Thread.Sleep(35);
-        keybd_event(vk, scan, KEYEVENTF_KEYUP, UIntPtr.Zero);
-        Thread.Sleep(35);
-
-        if ((shift & 1) != 0) {
-            keybd_event(0x10, 0x2A, KEYEVENTF_KEYUP, UIntPtr.Zero); // VK_SHIFT up
-            Thread.Sleep(25);
-        }
-    }
-
-    public static void ClickScreen(int normX, int normY) {
-        mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, normX, normY, 0, UIntPtr.Zero);
-        Thread.Sleep(50);
-        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-        Thread.Sleep(40);
-        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-        Thread.Sleep(60);
-    }
-
-    public static void Unlock(string password) {
-        // Step 1: Wake monitor hardware
-        mouse_event(MOUSEEVENTF_MOVE, 30, 30, 0, UIntPtr.Zero);
+    private static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extraInfo);
+    public static void Wake() {
+        mouse_event(0x0001, 30, 30, 0, UIntPtr.Zero);
         Thread.Sleep(100);
-        mouse_event(MOUSEEVENTF_MOVE, -30, -30, 0, UIntPtr.Zero);
-        Thread.Sleep(800);
-
-        // Step 2: Dismiss lock screen curtain with Space key & upward gesture
-        PressKey(0x20); // VK_SPACE
-        Thread.Sleep(600);
-
-        // Click to lift the curtain if it is still visible
-        ClickScreen(32768, 45000);
-        Thread.Sleep(150);
-        ClickScreen(32768, 25000);
-        Thread.Sleep(1200);
-
-        // Step 3: Focus credential box
-        ClickScreen(32768, 36000);
-        Thread.Sleep(150);
-        ClickScreen(32768, 38500);
-        Thread.Sleep(150);
-        ClickScreen(32768, 41000);
-        Thread.Sleep(400);
-
-        if (!string.IsNullOrEmpty(password)) {
-            // Step 4: Clear any pre-entered digits/chars using backspaces
-            for (int i = 0; i < 20; i++) {
-                PressKey(0x08); // VK_BACK
-            }
-            Thread.Sleep(150);
-
-            // Step 5: Send keystrokes via keybd_event (bypasses Windows lock screen SendInput restriction)
-            foreach (char c in password) {
-                SendChar(c);
-            }
-            Thread.Sleep(300);
-
-            // Step 6: Submit with Enter
-            PressKey(0x0D); // VK_RETURN
-            Thread.Sleep(200);
-        }
+        mouse_event(0x0001, -30, -30, 0, UIntPtr.Zero);
     }
 }
 "@ -ErrorAction Stop
-
-[WinUnlockerV3]::Unlock($Password)
-`;
-  // Always overwrite so latest logic is used
+[DisplayWaker]::Wake()`;
   fs.writeFileSync(scriptPath, scriptContent, "utf8");
   return scriptPath;
 }
-
-function unlockOrWakeWindows(unlockPassword) {
+function unlockOrWakeWindows() {
   return new Promise((resolve, reject) => {
     try {
       const scriptPath = getUnlockScriptPath();
-      const pwdArg = typeof unlockPassword === "string" ? unlockPassword.trim() : "";
-      const pwdBase64 = pwdArg ? Buffer.from(pwdArg, "utf8").toString("base64") : "";
 
-      // IMPORTANT: Do NOT use -NonInteractive and do NOT use windowsHide:true for unlock.
-      // SendInput() requires the process to run on the interactive desktop session.
-      // windowsHide:true or -NonInteractive causes SendInput to go to a hidden window
-      // instead of the actual lock screen — so the clicks and keystrokes never arrive.
+      // This worker only jiggles the mouse to wake the display; it does not interact with sign-in.
       const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath];
-      if (pwdBase64) {
-        args.push("-PasswordBase64", pwdBase64);
-      }
 
       const child = spawn("powershell.exe", args, {
         shell: false,
-        windowsHide: false,  // Must be false so it runs on interactive desktop
+        windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
 
@@ -719,12 +595,6 @@ async function pollOnce() {
     const battery = await getBatteryStatus();
     const result = await callAgentPoll({ action: "poll", battery });
     const command = result.command;
-    // unlock_password is returned by agent-poll when action === "unlock", or fallback to config
-    const unlockPassword =
-      (typeof result.unlock_password === "string" && result.unlock_password.trim().length > 0)
-        ? result.unlock_password.trim()
-        : (config.unlockPassword || null);
-
     if (!command) return;
 
     if (
@@ -787,13 +657,9 @@ async function pollOnce() {
       }
     } else if (action === "unlock") {
       try {
-        if (unlockPassword) {
-          console.log("Sending display wake signal and typing unlock password...");
-        } else {
-          console.log("Sending display wake signal (no password stored — dismissing lock screen only)...");
-        }
-        await unlockOrWakeWindows(unlockPassword);
-        console.log("Display wake/unlock signal sent successfully.");
+        console.log("Sending display wake signal...");
+        await unlockOrWakeWindows();
+        console.log("Display wake signal sent successfully; Windows sign-in remains under local user control.");
       } catch (error) {
         status = "failed";
         failureReason =

@@ -3,6 +3,8 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   ScrollView,
@@ -24,7 +26,8 @@ type Device = {
   battery_level?: number | null;
   is_charging?: boolean | null;
   power_online?: boolean | null;
-  unlock_password?: string | null;
+  rdp_host?: string | null;
+  rdp_port?: number | null;
 };
 
 type LockCommand = {
@@ -80,11 +83,11 @@ export default function HomeScreen() {
   const lockSubmitting = actionSubmitting !== null;
   const [latestScreenshot, setLatestScreenshot] = useState<ScreenshotItem | null>(null);
   const [screenshotModalVisible, setScreenshotModalVisible] = useState(false);
-  const [isPasswordModalVisible, setIsPasswordModalVisible] = useState(false);
-  const [unlockPassword, setUnlockPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [savingPassword, setSavingPassword] = useState(false);
   const [statusError, setStatusError] = useState("");
+  const [rdpSettingsVisible, setRdpSettingsVisible] = useState(false);
+  const [rdpHostInput, setRdpHostInput] = useState("");
+  const [rdpPortInput, setRdpPortInput] = useState("3389");
+  const [rdpSaving, setRdpSaving] = useState(false);
 
   // Track time in state to comply with React 19 purity rules
   const [now, setNow] = useState<number>(() => Date.now());
@@ -154,7 +157,7 @@ export default function HomeScreen() {
       try {
         const { data, error } = await supabase
           .from("devices")
-          .select("id, name, platform, last_seen_at, battery_level, is_charging, power_online, unlock_password")
+          .select("id, name, platform, last_seen_at, battery_level, is_charging, power_online, rdp_host, rdp_port")
           .eq("user_id", userId)
           .order("created_at", { ascending: false });
 
@@ -389,9 +392,6 @@ export default function HomeScreen() {
       dotColor: "#ef4444",
     };
   };
-
-  // Track whether a password is already saved for this device
-  const deviceHasPassword = !!(device?.unlock_password);
 
   const heartbeat = getHeartbeatState();
   const isCommandActive =
@@ -738,9 +738,7 @@ export default function HomeScreen() {
         sleep: "Sleep command dispatched! Windows workstation is entering sleep mode.",
         shutdown: "Shutdown command dispatched! Windows workstation will shut down in 10 seconds.",
         screenshot: "Screenshot command dispatched! Windows agent is capturing your desktop...",
-        unlock: deviceHasPassword
-          ? "Unlock command dispatched! Agent is waking your screen and typing your Windows password."
-          : "Wake command dispatched! Screen is waking and dismissing lock screen.",
+        unlock: "Wake command dispatched! Windows sign-in remains under local user control.",
       };
 
       const msg = actionSuccessMsg[action] || `${action} dispatched!`;
@@ -852,56 +850,6 @@ export default function HomeScreen() {
     ]);
   }
 
-  async function handleSaveUnlockPassword() {
-    if (!session?.user?.id || !device?.id) return;
-    const cleanPwd = unlockPassword.trim();
-    if (!cleanPwd) {
-      Alert.alert("Password required", "Please enter your Windows login password or PIN.");
-      return;
-    }
-    setSavingPassword(true);
-    try {
-      const { error } = await supabase
-        .from("devices")
-        .update({ unlock_password: cleanPwd })
-        .eq("id", device.id)
-        .eq("user_id", session.user.id);
-      if (error) throw error;
-      setDevice((prev) => (prev ? { ...prev, unlock_password: cleanPwd } : null));
-      setUnlockPassword("");
-      setIsPasswordModalVisible(false);
-      Alert.alert(
-        "✅ Password Configured",
-        "Your Windows password is now securely stored in your account. When you tap UNLOCK, the agent will wake your screen and auto-type your password."
-      );
-    } catch (err) {
-      Alert.alert("Failed to save", err instanceof Error ? err.message : "Could not save password.");
-    } finally {
-      if (isMountedRef.current) setSavingPassword(false);
-    }
-  }
-
-  async function handleClearUnlockPassword() {
-    if (!session?.user?.id || !device?.id) return;
-    setSavingPassword(true);
-    try {
-      const { error } = await supabase
-        .from("devices")
-        .update({ unlock_password: null })
-        .eq("id", device.id)
-        .eq("user_id", session.user.id);
-      if (error) throw error;
-      setDevice((prev) => (prev ? { ...prev, unlock_password: null } : null));
-      setUnlockPassword("");
-      setIsPasswordModalVisible(false);
-      Alert.alert("Password Removed", "Auto-unlock password has been cleared.");
-    } catch (err) {
-      Alert.alert("Failed", err instanceof Error ? err.message : "Could not remove password.");
-    } finally {
-      if (isMountedRef.current) setSavingPassword(false);
-    }
-  }
-
   async function handleSignOut() {
     const { error } = await supabase.auth.signOut();
     if (error) {
@@ -912,6 +860,76 @@ export default function HomeScreen() {
       setCommandHistory([]);
       setMessage("");
       setStatusError("");
+    }
+  }
+
+  function openRdpSettings() {
+    setRdpHostInput(device?.rdp_host ?? "");
+    setRdpPortInput(String(device?.rdp_port ?? 3389));
+    setRdpSettingsVisible(true);
+  }
+
+  async function handleSaveRdpSettings() {
+    if (!session?.user?.id || !device?.id) return;
+    const host = rdpHostInput.trim();
+    const port = Number(rdpPortInput.trim());
+    const validHostname = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+    if (host && !validHostname.test(host)) {
+      Alert.alert("Invalid address", "Enter a PC name, DNS name, or IPv4 address without a scheme or port.");
+      return;
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      Alert.alert("Invalid port", "Enter a port number from 1 to 65535.");
+      return;
+    }
+
+    setRdpSaving(true);
+    try {
+      const { error } = await supabase
+        .from("devices")
+        .update({ rdp_host: host || null, rdp_port: port })
+        .eq("id", device.id)
+        .eq("user_id", session.user.id);
+      if (error) throw error;
+      const updatedDevice = { ...device, rdp_host: host || null, rdp_port: port };
+      setDevice(updatedDevice);
+      setDeviceList((items) => items.map((item) => item.id === device.id ? updatedDevice : item));
+      setRdpSettingsVisible(false);
+    } catch (error) {
+      Alert.alert("Could not save", error instanceof Error ? error.message : "Remote Desktop settings were not saved.");
+    } finally {
+      setRdpSaving(false);
+    }
+  }
+
+  async function handleConnectRemoteDesktop() {
+    if (!device?.rdp_host) {
+      openRdpSettings();
+      return;
+    }
+    const address = `${device.rdp_host}:${device.rdp_port ?? 3389}`;
+    if (Platform.OS === "web") {
+      try {
+        if (typeof navigator !== "undefined" && navigator.clipboard) {
+          await navigator.clipboard.writeText(address);
+        }
+      } catch {
+        // The address is also shown below if clipboard access is unavailable.
+      }
+      Alert.alert(
+        "Open your Remote Desktop client",
+        `Connect to ${address} in Microsoft Remote Desktop or Windows App. This app does not send or store your Windows sign-in password.`,
+      );
+      return;
+    }
+    const rdpUri = `rdp://full%20address=s:${device.rdp_host}:${device.rdp_port ?? 3389}`;
+    try {
+      await Linking.openURL(rdpUri);
+    } catch {
+      Alert.alert(
+        "Remote Desktop app not found",
+        `Install Microsoft's Remote Desktop client or Windows App, then connect to ${address}.`,
+      );
     }
   }
 
@@ -1195,92 +1213,79 @@ export default function HomeScreen() {
               </View>
             </Modal>
 
-            {/* Unlock Password Modal */}
             <Modal
-              visible={isPasswordModalVisible}
+              visible={rdpSettingsVisible}
               transparent
               animationType="fade"
-              onRequestClose={() => {
-                if (!savingPassword) setIsPasswordModalVisible(false);
-              }}
+              onRequestClose={() => !rdpSaving && setRdpSettingsVisible(false)}
             >
-              <View style={styles.modalOverlay}>
-                <View style={styles.modalCard}>
+              <KeyboardAvoidingView
+                style={styles.rdpKeyboardAvoid}
+                behavior={Platform.OS === "ios" ? "padding" : "height"}
+              >
+                <View style={styles.modalOverlay}>
+                  <ScrollView
+                    contentContainerStyle={styles.rdpModalScrollContent}
+                    keyboardShouldPersistTaps="handled"
+                  >
+                    <View style={[styles.modalCard, styles.rdpModalCard]}>
                   <View style={styles.modalHeader}>
-                    <Text style={styles.modalTitle}>🔑 AUTO-UNLOCK PASSWORD</Text>
-                    <TouchableOpacity
-                      onPress={() => {
-                        if (!savingPassword) setIsPasswordModalVisible(false);
-                      }}
-                    >
+                    <Text style={styles.modalTitle}>REMOTE DESKTOP SETUP</Text>
+                    <TouchableOpacity onPress={() => !rdpSaving && setRdpSettingsVisible(false)}>
                       <Text style={styles.modalCloseIcon}>✕</Text>
                     </TouchableOpacity>
                   </View>
-
                   <Text style={styles.modalSubtitle}>
-                    Save your Windows user password or PIN. When you tap &quot;UNLOCK&quot;, the agent wakes the screen and types this password automatically.
+                    Enter the PC name or address reachable from this device, such as its LAN name or VPN address. Windows sign-in is handled by your RDP client.
                   </Text>
-
-                  <View style={styles.passwordSecurityNote}>
-                    <Text style={styles.passwordSecurityNoteText}>
-                      🔒 Stored encrypted in your private account. Only dispatched to your paired laptop during unlock.
-                    </Text>
-                  </View>
-
-                  <Text style={styles.fieldLabel}>WINDOWS LOGIN PASSWORD / PIN</Text>
-                  <View style={styles.passwordInputRow}>
-                    <TextInput
-                      style={[styles.modernInput, styles.passwordInputFlex]}
-                      placeholder="Enter Windows password or PIN"
-                      placeholderTextColor="#64748b"
-                      value={unlockPassword}
-                      onChangeText={setUnlockPassword}
-                      secureTextEntry={!showPassword}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      editable={!savingPassword}
-                    />
-                    <TouchableOpacity
-                      style={styles.showPasswordBtn}
-                      onPress={() => setShowPassword((p) => !p)}
-                    >
-                      <Text style={styles.showPasswordBtnText}>{showPassword ? "🙈" : "👁️"}</Text>
-                    </TouchableOpacity>
-                  </View>
-
+                  <Text style={styles.fieldLabel}>PC NAME OR ADDRESS</Text>
+                  <TextInput
+                    style={styles.modernInput}
+                    placeholder="e.g. my-laptop or 100.64.0.12"
+                    placeholderTextColor="#64748b"
+                    value={rdpHostInput}
+                    onChangeText={setRdpHostInput}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    editable={!rdpSaving}
+                  />
+                  <Text style={styles.fieldLabel}>RDP PORT</Text>
+                  <TextInput
+                    style={styles.modernInput}
+                    placeholder="3389"
+                    placeholderTextColor="#64748b"
+                    value={rdpPortInput}
+                    onChangeText={setRdpPortInput}
+                    keyboardType="number-pad"
+                    editable={!rdpSaving}
+                  />
+                  <Text style={styles.rdpSecurityNote}>
+                    Do not expose port 3389 directly to the internet. Use a trusted VPN or local network.
+                  </Text>
                   <View style={styles.modalBtnRow}>
-                    {deviceHasPassword && (
-                      <TouchableOpacity
-                        style={styles.modalClearBtn}
-                        onPress={() => void handleClearUnlockPassword()}
-                        disabled={savingPassword}
-                      >
-                        <Text style={styles.modalClearBtnText}>Remove</Text>
-                      </TouchableOpacity>
-                    )}
                     <TouchableOpacity
                       style={styles.modalCancelBtn}
-                      onPress={() => setIsPasswordModalVisible(false)}
-                      disabled={savingPassword}
+                      onPress={() => setRdpSettingsVisible(false)}
+                      disabled={rdpSaving}
                     >
                       <Text style={styles.modalCancelBtnText}>Cancel</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
-                      style={[styles.modalConfirmBtn, savingPassword && styles.btnDisabled]}
-                      onPress={() => void handleSaveUnlockPassword()}
-                      disabled={savingPassword}
+                      style={[styles.modalConfirmBtn, rdpSaving && styles.btnDisabled]}
+                      onPress={() => void handleSaveRdpSettings()}
+                      disabled={rdpSaving}
                     >
-                      {savingPassword ? (
+                      {rdpSaving ? (
                         <ActivityIndicator color="#ffffff" size="small" />
                       ) : (
-                        <Text style={styles.modalConfirmBtnText}>
-                          {deviceHasPassword ? "Update Password" : "Save Password"}
-                        </Text>
+                        <Text style={styles.modalConfirmBtnText}>Save Address</Text>
                       )}
                     </TouchableOpacity>
                   </View>
+                    </View>
+                  </ScrollView>
                 </View>
-              </View>
+              </KeyboardAvoidingView>
             </Modal>
 
             {deviceLoading && !device ? (
@@ -1520,7 +1525,7 @@ export default function HomeScreen() {
                       <TouchableOpacity
                         style={[
                           styles.powerActionBtn,
-                          deviceHasPassword ? styles.unlockBtnActive : styles.unlockBtn,
+                          styles.unlockBtn,
                           (actionSubmitting !== null || isCommandActive || heartbeat.status === "offline") &&
                             styles.heroLockBtnDisabled,
                         ]}
@@ -1532,10 +1537,10 @@ export default function HomeScreen() {
                           <ActivityIndicator size="small" color="#ffffff" />
                         ) : (
                           <>
-                            <Text style={styles.powerActionEmoji}>{deviceHasPassword ? "🔑" : "☀️"}</Text>
-                            <Text style={styles.powerActionText}>{deviceHasPassword ? "WAKE & UNLOCK" : "WAKE SCREEN"}</Text>
+                            <Text style={styles.powerActionEmoji}>☀️</Text>
+                            <Text style={styles.powerActionText}>WAKE SCREEN</Text>
                             <Text style={styles.powerActionSub} numberOfLines={1}>
-                              {deviceHasPassword ? "Auto-types password" : "Dismiss cover"}
+                              Wake display; sign in on the laptop
                             </Text>
                           </>
                         )}
@@ -1543,35 +1548,31 @@ export default function HomeScreen() {
                     </View>
                   </View>
 
-                  {/* Auto-Unlock Windows Password Card */}
-                  <TouchableOpacity
-                    style={[styles.passwordBannerBtn, deviceHasPassword && styles.passwordBannerBtnActive]}
-                    onPress={() => {
-                      setUnlockPassword("");
-                      setShowPassword(false);
-                      setIsPasswordModalVisible(true);
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <View style={styles.passwordBannerLeft}>
-                      <Text style={styles.passwordBannerIcon}>{deviceHasPassword ? "🔑" : "🔒"}</Text>
-                      <View style={styles.passwordBannerTextWrapper}>
-                        <Text style={styles.passwordBannerTitle}>
-                          {deviceHasPassword ? "Auto-Unlock: Password Configured" : "Enable One-Click Auto-Unlock"}
-                        </Text>
-                        <Text style={styles.passwordBannerSub}>
-                          {deviceHasPassword
-                            ? "Windows password saved • Tap to change or remove"
-                            : "Save your Windows password so UNLOCK works directly"}
+                  <View style={styles.rdpCard}>
+                    <View style={styles.rdpCardHeading}>
+                      <View style={styles.rdpAddressBlock}>
+                        <Text style={styles.rdpCardTitle}>REMOTE DESKTOP</Text>
+                        <Text style={styles.rdpCardAddress} numberOfLines={2}>
+                          {device.rdp_host ? `${device.rdp_host}:${device.rdp_port ?? 3389}` : "No PC address configured"}
                         </Text>
                       </View>
+                      <TouchableOpacity onPress={openRdpSettings} style={styles.rdpSettingsButton}>
+                        <Text style={styles.rdpSettingsButtonText}>{device.rdp_host ? "EDIT" : "SET UP"}</Text>
+                      </TouchableOpacity>
                     </View>
-                    <View style={styles.passwordBannerPill}>
-                      <Text style={styles.passwordBannerPillText}>
-                        {deviceHasPassword ? "Edit" : "Set Up"}
+                    <Text style={styles.rdpCardNote}>
+                      Uses your installed Microsoft RDP client. The PC must support Remote Desktop (Windows Pro) and be reachable over LAN or VPN. Don’t expose RDP directly to the internet.
+                    </Text>
+                    <TouchableOpacity
+                      style={styles.rdpConnectButton}
+                      onPress={() => void handleConnectRemoteDesktop()}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.rdpConnectButtonText} numberOfLines={2}>
+                        {device.rdp_host ? "CONNECT WITH REMOTE DESKTOP" : "CONFIGURE REMOTE DESKTOP"}
                       </Text>
-                    </View>
-                  </TouchableOpacity>
+                    </TouchableOpacity>
+                  </View>
 
                   {isCommandActive && (
                     <View style={styles.inProgressBanner}>
@@ -2328,6 +2329,86 @@ const styles = StyleSheet.create({
   unlockBtn: {
     backgroundColor: "rgba(245, 158, 11, 0.15)",
     borderColor: "rgba(245, 158, 11, 0.35)",
+  },
+  rdpCard: {
+    marginTop: 12,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: "#101a2a",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.24)",
+  },
+  rdpCardHeading: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  rdpAddressBlock: {
+    flex: 1,
+    minWidth: 0,
+    marginRight: 8,
+  },
+  rdpCardTitle: {
+    color: "#e2e8f0",
+    fontSize: 12,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+  },
+  rdpCardAddress: {
+    marginTop: 4,
+    color: "#7dd3fc",
+    fontSize: 12,
+  },
+  rdpSettingsButton: {
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: "rgba(56, 189, 248, 0.12)",
+    ...Platform.select({ web: { cursor: "pointer" } }),
+  },
+  rdpSettingsButtonText: {
+    color: "#7dd3fc",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  rdpCardNote: {
+    marginTop: 8,
+    color: "#94a3b8",
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  rdpConnectButton: {
+    marginTop: 10,
+    paddingVertical: 11,
+    paddingHorizontal: 8,
+    borderRadius: 9,
+    minHeight: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#0369a1",
+    ...Platform.select({ web: { cursor: "pointer" } }),
+  },
+  rdpConnectButtonText: {
+    color: "#f0f9ff",
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  rdpSecurityNote: {
+    marginTop: 10,
+    color: "#fbbf24",
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  rdpKeyboardAvoid: {
+    flex: 1,
+  },
+  rdpModalScrollContent: {
+    flexGrow: 1,
+    justifyContent: "center",
+  },
+  rdpModalCard: {
+    maxHeight: "95%",
   },
   unlockBtnActive: {
     backgroundColor: "rgba(16, 185, 129, 0.2)",

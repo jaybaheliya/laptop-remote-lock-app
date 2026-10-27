@@ -11,6 +11,7 @@ popd
 :: Setup user log folder in LocalAppData to avoid permission issues
 set "LOG_DIR=%LOCALAPPDATA%\LaptopLockAgent\logs"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+set "STOP_FLAG=%LOCALAPPDATA%\LaptopLockAgent\agent.stop"
 
 :: Path to bundled portable Node.js executable
 set "NODE_EXE=%APP_DIR%\bin\node.exe"
@@ -42,6 +43,7 @@ if exist "%APP_DIR%\app\LaptopLockAgentTray.exe" (
 )
 
 :restart
+if exist "%STOP_FLAG%" exit /b 0
 :: Log rotation: if agent.log > 5MB (5242880 bytes), rotate to agent.old.log
 if exist "%LOG_DIR%\agent.log" (
     for %%F in ("%LOG_DIR%\agent.log") do (
@@ -57,8 +59,10 @@ echo [%date% %time%] Starting Laptop Lock Agent...>> "%LOG_DIR%\agent.log"
 :: Execute agent.js with user LocalAppData configuration
 "%NODE_EXE%" "%APP_DIR%\app\agent.js" >> "%LOG_DIR%\agent.log" 2>&1
 
+if exist "%STOP_FLAG%" exit /b 0
 echo [%date% %time%] Agent process exited with code %ERRORLEVEL%. Restarting in 10 seconds...>> "%LOG_DIR%\agent.log"
 
 timeout /t 10 /nobreak >nul
+if exist "%STOP_FLAG%" exit /b 0
 goto restart
 
