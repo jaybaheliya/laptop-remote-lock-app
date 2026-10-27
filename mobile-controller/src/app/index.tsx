@@ -1240,7 +1240,7 @@ export default function HomeScreen() {
                   </Text>
                   <Text style={styles.fieldLabel}>PC NAME OR ADDRESS</Text>
                   <TextInput
-                    style={styles.modernInput}
+                    style={styles.rdpInput}
                     placeholder="e.g. my-laptop or 100.64.0.12"
                     placeholderTextColor="#64748b"
                     value={rdpHostInput}
@@ -1251,7 +1251,7 @@ export default function HomeScreen() {
                   />
                   <Text style={styles.fieldLabel}>RDP PORT</Text>
                   <TextInput
-                    style={styles.modernInput}
+                    style={styles.rdpInput}
                     placeholder="3389"
                     placeholderTextColor="#64748b"
                     value={rdpPortInput}
@@ -2844,6 +2844,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     fontSize: 14,
+    color: "#f8fafc",
+    marginBottom: 14,
+  },
+  rdpInput: {
+    backgroundColor: "#161f30",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.09)",
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    // iOS Safari zooms the page when a focused input uses a font smaller than 16px.
+    fontSize: 16,
     color: "#f8fafc",
     marginBottom: 14,
   },
