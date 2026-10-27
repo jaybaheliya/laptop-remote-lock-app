@@ -500,153 +500,113 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-public class WinUnlocker2 {
-    // ----- Structs -----
-    [StructLayout(LayoutKind.Sequential)]
-    public struct MOUSEINPUT {
-        public int dx, dy;
-        public uint mouseData, dwFlags, time;
-        public IntPtr dwExtraInfo;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    public struct KEYBDINPUT {
-        public ushort wVk, wScan;
-        public uint dwFlags, time;
-        public IntPtr dwExtraInfo;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    public struct HARDWAREINPUT {
-        public uint uMsg;
-        public ushort wParamL, wParamH;
-    }
-    [StructLayout(LayoutKind.Explicit)]
-    public struct INPUT {
-        [FieldOffset(0)] public uint type;
-        [FieldOffset(4)] public MOUSEINPUT mi;
-        [FieldOffset(4)] public KEYBDINPUT ki;
-        [FieldOffset(4)] public HARDWAREINPUT hi;
-    }
+public class WinUnlockerV3 {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
 
-    // ----- P/Invokes -----
-    [DllImport("user32.dll", SetLastError=true)]
-    public static extern uint SendInput(uint n, INPUT[] inp, int size);
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")]
-    public static extern int GetSystemMetrics(int nIndex);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
     [DllImport("user32.dll")]
     public static extern uint MapVirtualKey(uint uCode, uint uMapType);
 
-    // ----- Constants -----
-    const uint INPUT_MOUSE    = 0;
-    const uint INPUT_KEYBOARD = 1;
-    const uint MOUSEEVENTF_MOVE       = 0x0001;
-    const uint MOUSEEVENTF_LEFTDOWN   = 0x0002;
-    const uint MOUSEEVENTF_LEFTUP     = 0x0004;
-    const uint MOUSEEVENTF_ABSOLUTE   = 0x8000;
-    const uint KEYEVENTF_KEYUP        = 0x0002;
-    const uint KEYEVENTF_UNICODE      = 0x0004;
+    [DllImport("user32.dll")]
+    public static extern short VkKeyScan(char ch);
 
-    // ----- Helpers -----
-    static int SZ { get { return System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)); } }
+    const uint MOUSEEVENTF_MOVE = 0x0001;
+    const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
 
-    static void MouseMove(int normX, int normY) {
-        INPUT[] inp = new INPUT[1];
-        inp[0].type = INPUT_MOUSE;
-        inp[0].mi.dx = normX;
-        inp[0].mi.dy = normY;
-        inp[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-        SendInput(1, inp, SZ);
-    }
+    const uint KEYEVENTF_KEYDOWN = 0x0000;
+    const uint KEYEVENTF_KEYUP = 0x0002;
 
-    static void MouseClick(int normX, int normY) {
-        INPUT[] inp = new INPUT[3];
-        inp[0].type = INPUT_MOUSE; inp[0].mi.dx = normX; inp[0].mi.dy = normY;
-        inp[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-        inp[1].type = INPUT_MOUSE; inp[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-        inp[2].type = INPUT_MOUSE; inp[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-        SendInput(3, inp, SZ);
-    }
-
-    static void SendVKey(ushort vk) {
+    public static void PressKey(byte vk) {
         byte scan = (byte)MapVirtualKey(vk, 0);
-        INPUT[] inp = new INPUT[2];
-        inp[0].type = INPUT_KEYBOARD; inp[0].ki.wVk = vk; inp[0].ki.wScan = scan; inp[0].ki.dwFlags = 0;
-        inp[1].type = INPUT_KEYBOARD; inp[1].ki.wVk = vk; inp[1].ki.wScan = scan; inp[1].ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, new INPUT[]{inp[0]}, SZ); Thread.Sleep(30);
-        SendInput(1, new INPUT[]{inp[1]}, SZ); Thread.Sleep(30);
+        keybd_event(vk, scan, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+        Thread.Sleep(35);
+        keybd_event(vk, scan, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        Thread.Sleep(45);
     }
 
-    static void SendUnichar(char c) {
-        INPUT[] dn = new INPUT[1];
-        dn[0].type = INPUT_KEYBOARD; dn[0].ki.wVk = 0; dn[0].ki.wScan = (ushort)c;
-        dn[0].ki.dwFlags = KEYEVENTF_UNICODE;
-        INPUT[] up = new INPUT[1];
-        up[0].type = INPUT_KEYBOARD; up[0].ki.wVk = 0; up[0].ki.wScan = (ushort)c;
-        up[0].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-        SendInput(1, dn, SZ); Thread.Sleep(30);
-        SendInput(1, up, SZ); Thread.Sleep(50);
+    public static void SendChar(char c) {
+        short vkScan = VkKeyScan(c);
+        byte vk = (byte)(vkScan & 0xFF);
+        byte shift = (byte)((vkScan >> 8) & 0xFF);
+
+        if ((shift & 1) != 0) {
+            keybd_event(0x10, 0x2A, KEYEVENTF_KEYDOWN, UIntPtr.Zero); // VK_SHIFT down
+            Thread.Sleep(25);
+        }
+
+        byte scan = (byte)MapVirtualKey(vk, 0);
+        keybd_event(vk, scan, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
+        Thread.Sleep(35);
+        keybd_event(vk, scan, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        Thread.Sleep(35);
+
+        if ((shift & 1) != 0) {
+            keybd_event(0x10, 0x2A, KEYEVENTF_KEYUP, UIntPtr.Zero); // VK_SHIFT up
+            Thread.Sleep(25);
+        }
     }
 
-    // ----- Main entry -----
+    public static void ClickScreen(int normX, int normY) {
+        mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, normX, normY, 0, UIntPtr.Zero);
+        Thread.Sleep(50);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(40);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(60);
+    }
+
     public static void Unlock(string password) {
-        // Step 1: Gentle mouse jiggle to wake the display (hardware-level signal)
-        MouseMove(32000, 32000);
+        // Step 1: Wake monitor hardware
+        mouse_event(MOUSEEVENTF_MOVE, 30, 30, 0, UIntPtr.Zero);
         Thread.Sleep(100);
-        MouseMove(33000, 33000);
-        Thread.Sleep(100);
-        MouseMove(32000, 32000);
-        Thread.Sleep(1000); // Give monitor time to power on and display to render
+        mouse_event(MOUSEEVENTF_MOVE, -30, -30, 0, UIntPtr.Zero);
+        Thread.Sleep(800);
 
-        // Step 2: Press Escape first to clear any previous state on lock screen
-        SendVKey(0x1B); // VK_ESCAPE
-        Thread.Sleep(300);
+        // Step 2: Dismiss lock screen curtain with Space key & upward gesture
+        PressKey(0x20); // VK_SPACE
+        Thread.Sleep(600);
 
-        // Step 3: Click the center-ish of the screen to dismiss the Windows "swipe up" overlay
-        // Windows 10/11 lock screen has a photo overlay you must click-dismiss before password box appears
-        MouseClick(32768, 32768); // center
-        Thread.Sleep(200);
-        MouseClick(32768, 28000); // slightly above center (avoid taskbar/user icon area)
-        Thread.Sleep(1500); // Wait for slide-up animation to fully complete
+        // Click to lift the curtain if it is still visible
+        ClickScreen(32768, 45000);
+        Thread.Sleep(150);
+        ClickScreen(32768, 25000);
+        Thread.Sleep(1200);
 
-        // Step 4: Click where the password input box appears
-        // On Windows 10/11 the password field sits at roughly 55-60% down the screen.
-        // We click 3 different vertical positions to maximize the chance of hitting it.
-        int screenH = GetSystemMetrics(1); // real pixels
-        int screenW = GetSystemMetrics(0);
-        // Normalized (0-65535): passwordFieldY ~ 60% = 39321
-        MouseClick(32768, 37000); Thread.Sleep(150);
-        MouseClick(32768, 39000); Thread.Sleep(150);
-        MouseClick(32768, 41000); Thread.Sleep(300);
+        // Step 3: Focus credential box
+        ClickScreen(32768, 36000);
+        Thread.Sleep(150);
+        ClickScreen(32768, 38500);
+        Thread.Sleep(150);
+        ClickScreen(32768, 41000);
+        Thread.Sleep(400);
 
         if (!string.IsNullOrEmpty(password)) {
-            // Step 5: Ctrl+A to select all existing text in the field first (clear any old chars)
-            INPUT[] ctrlDown = new INPUT[1];
-            ctrlDown[0].type = INPUT_KEYBOARD; ctrlDown[0].ki.wVk = 0x11; // VK_CONTROL
-            SendInput(1, ctrlDown, SZ);
-            Thread.Sleep(30);
-            SendVKey(0x41); // 'A'
-            INPUT[] ctrlUp = new INPUT[1];
-            ctrlUp[0].type = INPUT_KEYBOARD; ctrlUp[0].ki.wVk = 0x11;
-            ctrlUp[0].ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(1, ctrlUp, SZ);
-            Thread.Sleep(100);
+            // Step 4: Clear any pre-entered digits/chars using backspaces
+            for (int i = 0; i < 20; i++) {
+                PressKey(0x08); // VK_BACK
+            }
+            Thread.Sleep(150);
 
-            // Step 6: Type password char by char via Unicode SendInput
+            // Step 5: Send keystrokes via keybd_event (bypasses Windows lock screen SendInput restriction)
             foreach (char c in password) {
-                SendUnichar(c);
+                SendChar(c);
             }
             Thread.Sleep(300);
 
-            // Step 7: Press Enter to submit
-            SendVKey(0x0D); // VK_RETURN
+            // Step 6: Submit with Enter
+            PressKey(0x0D); // VK_RETURN
             Thread.Sleep(200);
         }
     }
 }
 "@ -ErrorAction Stop
 
-[WinUnlocker2]::Unlock($Password)
+[WinUnlockerV3]::Unlock($Password)
 `;
   // Always overwrite so latest logic is used
   fs.writeFileSync(scriptPath, scriptContent, "utf8");
