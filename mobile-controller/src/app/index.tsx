@@ -13,6 +13,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -57,6 +58,7 @@ const HEARTBEAT_FRESHNESS_MS = 20000; // 20 seconds freshness window
 const POLL_INTERVAL_MS = 4000; // 4 seconds coordinated poll
 
 export default function HomeScreen() {
+  const { width: windowWidth } = useWindowDimensions();
   const [session, setSession] = useState<any>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -228,7 +230,7 @@ export default function HomeScreen() {
           .select("id, action, status, created_at, failure_reason")
           .eq("device_id", deviceId)
           .eq("user_id", userId)
-          .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording"])
+          .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording", "delete_recording"])
           .order("created_at", { ascending: false })
           .limit(10);
 
@@ -242,7 +244,7 @@ export default function HomeScreen() {
             .select("id, action, status, created_at")
             .eq("device_id", deviceId)
             .eq("user_id", userId)
-            .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "screen_record", "rename_recording"])
+            .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "screen_record", "rename_recording", "delete_recording"])
             .order("created_at", { ascending: false })
             .limit(10);
 
@@ -1644,7 +1646,7 @@ export default function HomeScreen() {
                       <TouchableOpacity
                         onPress={() => setScreenshotModalVisible(true)}
                         activeOpacity={0.9}
-                        style={styles.screenshotImageWrapper}
+                        style={[styles.screenshotImageWrapper, { height: windowWidth < 600 ? Math.max(100, windowWidth * 0.32) : 160 }]}
                       >
                         <Image
                           source={{ uri: latestScreenshot.image_data }}
@@ -1785,6 +1787,7 @@ export default function HomeScreen() {
                                   save_note: "Save quick note",
                                   screen_record: "Screen recording",
                                   rename_recording: "Rename recording",
+                                  delete_recording: "Delete recording",
                                 };
                                 const label = labels[act] || act;
                                 if (cmd.status === "completed") return `${label} Executed`;

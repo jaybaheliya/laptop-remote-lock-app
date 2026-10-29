@@ -636,7 +636,7 @@ function unlockOrWakeWindows() {
   });
 }
 
-const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording"];
+const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording", "delete_recording"];
 
 let screenRecordingSession = null;
 let ffmpegDownloadPromise = null;
@@ -842,6 +842,17 @@ function renameSavedRecording(fileName, newName, recordingId) {
   return { renamed: true, recording_id: recordingId, old_file_name: fileName, file_name: nextName, local_path: destination };
 }
 
+function deleteSavedRecording(fileName, recordingId) {
+  if (typeof recordingId !== "string" || !/^[0-9a-f-]{36}$/i.test(recordingId)) throw new Error("Invalid recording selection");
+  if (typeof fileName !== "string" || path.basename(fileName) !== fileName || !fileName.toLowerCase().endsWith(".mp4")) throw new Error("Invalid recording file name");
+  const folder = path.resolve(os.homedir(), "Videos", "Laptop Lock Recordings");
+  const localPath = path.resolve(folder, fileName);
+  if (path.dirname(localPath) !== folder) throw new Error("Invalid recording file name");
+  const existed = fs.existsSync(localPath);
+  if (existed) fs.unlinkSync(localPath);
+  return { deleted: true, recording_id: recordingId, file_name: fileName, local_deleted: existed };
+}
+
 let cachedBattery = null;
 let lastBatteryFetchTime = 0;
 
@@ -1025,6 +1036,13 @@ async function pollOnce() {
       } catch (error) {
         status = "failed";
         failureReason = error instanceof Error ? error.message : "Could not rename the recording";
+      }
+    } else if (action === "delete_recording") {
+      try {
+        commandResult = deleteSavedRecording(String(command.payload?.file_name || ""), String(command.payload?.recording_id || ""));
+      } catch (error) {
+        status = "failed";
+        failureReason = error instanceof Error ? error.message : "Could not delete the recording";
       }
     } else if (action === "refresh_status") {
       commandResult = { telemetry };

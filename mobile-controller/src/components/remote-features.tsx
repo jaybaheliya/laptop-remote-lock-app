@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Linking,
+  Modal,
   Platform,
   Share,
   StyleSheet,
@@ -55,6 +56,8 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
   const [recordingsLoading, setRecordingsLoading] = useState(false);
   const [renamingRecordingId, setRenamingRecordingId] = useState<string | null>(null);
   const [renamingRecordingName, setRenamingRecordingName] = useState("");
+  const [deletingRecordingId, setDeletingRecordingId] = useState<string | null>(null);
+  const [pendingDeleteRecording, setPendingDeleteRecording] = useState<ScreenRecording | null>(null);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [appsExpanded, setAppsExpanded] = useState(false);
   const [notesExpanded, setNotesExpanded] = useState(false);
@@ -66,22 +69,26 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
       .select("id,action,status,created_at,result")
       .eq("device_id", deviceId)
       .eq("user_id", userId)
-      .in("action", ["screen_record", "rename_recording"])
+      .in("action", ["screen_record", "rename_recording", "delete_recording"])
       .order("created_at", { ascending: false })
       .limit(30);
     if (!error) {
       const rows = data ?? [];
       const latestNames = new Map<string, string>();
+      const deletedIds = new Set<string>();
       for (const row of rows) {
         const result = row.result as Record<string, unknown> | null;
         if (row.action === "rename_recording" && row.status === "completed" && typeof result?.recording_id === "string" && typeof result.file_name === "string" && !latestNames.has(result.recording_id)) {
           latestNames.set(result.recording_id, result.file_name);
         }
+        if (row.action === "delete_recording" && row.status === "completed" && typeof result?.recording_id === "string") {
+          deletedIds.add(result.recording_id);
+        }
       }
       const items = rows.flatMap((row) => {
         if (row.action !== "screen_record") return [];
         const result = row.result as Record<string, unknown> | null;
-        if (row.status !== "completed" || result?.saved_locally !== true) return [];
+        if (row.status !== "completed" || result?.saved_locally !== true || deletedIds.has(row.id)) return [];
         return [{
           id: row.id,
           created_at: row.created_at,
@@ -405,9 +412,9 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
   async function renameRecording(item: ScreenRecording) {
     const newName = renamingRecordingName.trim();
     if (!newName) { Alert.alert("Add a name", "Enter a name for this clip."); return; }
-    const commandId = await sendCommand("rename_recording", { recording_id: item.id, file_name: item.file_name, new_name: newName });
-    if (!commandId) return;
     try {
+      const commandId = await sendCommand("rename_recording", { recording_id: item.id, file_name: item.file_name, new_name: newName });
+      if (!commandId) return;
       await waitForRecordingCommand(commandId);
       setRenamingRecordingId(null);
       setRenamingRecordingName("");
@@ -415,6 +422,36 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
     } catch (error) {
       Alert.alert("Could not rename clip", error instanceof Error ? error.message : "Try again when the laptop is online.");
     }
+  }
+
+  async function deleteRecording(item: ScreenRecording) {
+    if (!online) { Alert.alert("Laptop is offline", "Reconnect the laptop before deleting its saved clip."); return; }
+    setDeletingRecordingId(item.id);
+    let phoneCopyDeleted = false;
+    try {
+      if (item.storage_path) {
+        const { data, error } = await supabase.functions.invoke("recording-link", { body: { action: "delete", command_id: item.id } });
+        if (error || data?.deleted !== true) throw new Error(data?.error || error?.message || "Could not delete the phone copy.");
+        phoneCopyDeleted = true;
+      }
+      const commandId = await sendCommand("delete_recording", { recording_id: item.id, file_name: item.file_name });
+      if (!commandId) throw new Error("The phone copy was removed, but the laptop could not confirm the local deletion.");
+      await waitForRecordingCommand(commandId);
+      setRecordings((current) => current.filter((recordingItem) => recordingItem.id !== item.id));
+      setPendingDeleteRecording(null);
+      Alert.alert("Video deleted", phoneCopyDeleted ? "The laptop file and in-app phone copy were deleted. Any files already downloaded to the phone remain there." : "The saved laptop video was deleted.");
+    } catch (error) {
+      setPendingDeleteRecording(null);
+      await loadRecordings();
+      const detail = error instanceof Error ? error.message : "Try again when the laptop is online.";
+      Alert.alert(phoneCopyDeleted ? "Phone copy deleted" : "Could not delete video", phoneCopyDeleted ? `The phone copy is gone, but the laptop copy may remain. ${detail}` : detail);
+    } finally {
+      setDeletingRecordingId(null);
+    }
+  }
+
+  function confirmDeleteRecording(item: ScreenRecording) {
+    setPendingDeleteRecording(item);
   }
 
   return (
@@ -493,28 +530,43 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           <Text style={styles.secondaryButtonText}>{recordingActionLoading ? "Checking..." : "Check Windows recording status"}</Text>
         </TouchableOpacity>
         <View style={styles.recordingListHeading}><Text style={styles.infoLabel}>Recent clips</Text><TouchableOpacity onPress={() => void loadRecordings()} disabled={recordingsLoading}><Text style={styles.sendText}>{recordingsLoading ? "Loading" : "Refresh"}</Text></TouchableOpacity></View>
-        {recordings.map((item) => (
-          <View key={item.id} style={styles.recordingRow}>
-            <View style={styles.recordingDetails}>
-              <Text style={styles.taskName} numberOfLines={1}>{item.file_name}</Text>
-              <Text style={styles.taskMeta}>{item.duration_seconds ? `${item.duration_seconds}s - ` : ""}{item.sent_to_phone ? "Private phone copy ready" : "Saved on laptop"}</Text>
-              {renamingRecordingId === item.id && <TextInput style={styles.renameInput} value={renamingRecordingName} onChangeText={setRenamingRecordingName} placeholder="New clip name" placeholderTextColor="#8090a5" maxLength={80} returnKeyType="done" onSubmitEditing={() => void renameRecording(item)} />}
-            </View>
-            <View style={styles.noteActions}>
-              {renamingRecordingId === item.id ? <>
-                <TouchableOpacity style={styles.recordingAction} onPress={() => void renameRecording(item)} disabled={!online || sending || commandBusy || !!localActiveCommand}><Text style={styles.sendText}>Save</Text></TouchableOpacity>
-                <TouchableOpacity style={styles.recordingAction} onPress={() => setRenamingRecordingId(null)}><Text style={styles.deleteText}>Cancel</Text></TouchableOpacity>
-              </> : <>
-                {item.storage_path && <>
-                  <TouchableOpacity style={styles.recordingAction} onPress={() => void openRecording(item)} accessibilityLabel="Open recording"><Text style={styles.sendText}>Open</Text></TouchableOpacity>
-                  <TouchableOpacity style={styles.recordingAction} onPress={() => void downloadRecording(item)} accessibilityLabel="Download recording"><Text style={styles.sendText}>Save</Text></TouchableOpacity>
-                  <TouchableOpacity style={styles.recordingAction} onPress={() => void shareRecording(item)} accessibilityLabel="Send recording"><Text style={styles.sendText}>Send</Text></TouchableOpacity>
+        {recordings.map((item) => {
+          const isRenaming = renamingRecordingId === item.id;
+          const isDeleting = deletingRecordingId === item.id;
+          const phoneActionDisabled = sending || commandBusy || !!localActiveCommand || isDeleting || deletingRecordingId !== null;
+          const actionDisabled = !online || phoneActionDisabled || recordingActionLoading;
+          return (
+            <View key={item.id} style={styles.recordingCard}>
+              <View style={styles.recordingMainRow}>
+                <View style={styles.recordingThumb} accessibilityLabel="MP4 video">
+                  <Text style={styles.recordingThumbPlay}>▶</Text>
+                  <Text style={styles.recordingThumbLabel}>MP4</Text>
+                </View>
+                <View style={styles.recordingDetails}>
+                  <Text style={styles.recordingFileName} numberOfLines={1}>{item.file_name.replace(/\.mp4$/i, "")}</Text>
+                  <Text style={styles.recordingMeta}>{item.duration_seconds ? `${item.duration_seconds}s · ` : ""}{item.storage_path ? "Laptop + phone" : "Laptop only"}</Text>
+                </View>
+              </View>
+              {isRenaming && <TextInput style={styles.renameInput} value={renamingRecordingName} onChangeText={setRenamingRecordingName} placeholder="Video name" placeholderTextColor="#8090a5" maxLength={80} returnKeyType="done" onSubmitEditing={() => void renameRecording(item)} autoFocus />}
+              {!isRenaming && item.storage_path && <View style={styles.recordingCtaRow}>
+                <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaPrimary]} onPress={() => void openRecording(item)} disabled={phoneActionDisabled} accessibilityLabel="Open video"><Text style={styles.recordingCtaPrimaryText}>Open</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.recordingCta} onPress={() => void downloadRecording(item)} disabled={phoneActionDisabled} accessibilityLabel="Download video to this phone"><Text style={styles.recordingCtaText}>Download</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.recordingCta} onPress={() => void shareRecording(item)} disabled={phoneActionDisabled} accessibilityLabel="Share video"><Text style={styles.recordingCtaText}>Share</Text></TouchableOpacity>
+              </View>}
+              <View style={styles.recordingCtaRow}>
+                {isRenaming ? <>
+                  <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaPrimary, actionDisabled && styles.disabled]} onPress={() => void renameRecording(item)} disabled={actionDisabled}><Text style={styles.recordingCtaPrimaryText}>Save name</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.recordingCta} onPress={() => { setRenamingRecordingId(null); setRenamingRecordingName(""); }}><Text style={styles.recordingCtaText}>Cancel</Text></TouchableOpacity>
+                </> : <>
+                  <TouchableOpacity style={styles.recordingCta} onPress={() => { setRenamingRecordingId(item.id); setRenamingRecordingName(item.file_name.replace(/\.mp4$/i, "")); }} disabled={actionDisabled} accessibilityLabel="Rename video"><Text style={styles.recordingCtaText}>Rename</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaDanger, actionDisabled && styles.disabled]} onPress={() => confirmDeleteRecording(item)} disabled={actionDisabled} accessibilityLabel="Delete video">
+                    {isDeleting ? <ActivityIndicator color="#fda4af" size="small" /> : <Text style={styles.recordingCtaDangerText}>Delete</Text>}
+                  </TouchableOpacity>
                 </>}
-                <TouchableOpacity style={styles.recordingAction} onPress={() => { setRenamingRecordingId(item.id); setRenamingRecordingName(item.file_name.replace(/\.mp4$/i, "")); }} disabled={!online} accessibilityLabel="Rename recording"><Text style={styles.sendText}>Rename</Text></TouchableOpacity>
-              </>}
+              </View>
             </View>
-          </View>
-        ))}
+          );
+        })}
         {!recordingsLoading && recordings.length === 0 && <Text style={styles.muted}>Your saved clips will appear here. Turn on the phone-copy option before recording to open and share them from this list.</Text>}
       </View>
 
@@ -543,6 +595,20 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           {!notesLoading && notes.length === 0 && <Text style={styles.muted}>Notes you save here are private to your account.</Text>}
         </>}
       </View>
+      <Modal visible={pendingDeleteRecording !== null} transparent animationType="fade" onRequestClose={() => deletingRecordingId === null && setPendingDeleteRecording(null)}>
+        <View style={styles.deleteModalOverlay}>
+          <View style={styles.deleteModalCard}>
+            <Text style={styles.title}>Delete this video?</Text>
+            <Text style={styles.muted}>{pendingDeleteRecording?.storage_path ? "This permanently removes the laptop file and the in-app phone copy. Files already downloaded to your phone stay there." : "This permanently removes the video saved on the laptop."}</Text>
+            <View style={styles.deleteModalActions}>
+              <TouchableOpacity style={styles.recordingCta} onPress={() => setPendingDeleteRecording(null)} disabled={deletingRecordingId !== null}><Text style={styles.recordingCtaText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaDanger]} onPress={() => pendingDeleteRecording && void deleteRecording(pendingDeleteRecording)} disabled={deletingRecordingId !== null}>
+                {deletingRecordingId !== null ? <ActivityIndicator color="#fda4af" size="small" /> : <Text style={styles.recordingCtaDangerText}>Delete video</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -587,10 +653,25 @@ const styles = StyleSheet.create({
   recordingButtonText: { color: "#fff", fontWeight: "700", fontSize: 14 },
   recordingStatusButton: { width: "100%", minHeight: 40, borderRadius: 11, backgroundColor: "rgba(148,163,184,0.10)", alignItems: "center", justifyContent: "center", paddingHorizontal: 12 },
   recordingListHeading: { minHeight: 30, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 4 },
-  recordingRow: { width: "100%", minWidth: 0, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.08)", paddingTop: 10 },
+  recordingCard: { width: "100%", minWidth: 0, gap: 9, marginTop: 3, padding: 11, borderRadius: 14, backgroundColor: "rgba(15,23,42,0.72)", borderWidth: 1, borderColor: "rgba(148,163,184,0.14)" },
+  recordingMainRow: { width: "100%", minWidth: 0, flexDirection: "row", alignItems: "center", gap: 10 },
+  recordingThumb: { width: 48, height: 48, flexShrink: 0, alignItems: "center", justifyContent: "center", gap: 1, borderRadius: 10, backgroundColor: "#111b2b", borderWidth: 1, borderColor: "rgba(96,165,250,0.24)" },
+  recordingThumbPlay: { color: "#93c5fd", fontSize: 16, lineHeight: 18 },
+  recordingThumbLabel: { color: "#94a3b8", fontSize: 8, fontWeight: "800", letterSpacing: 0.8 },
   recordingDetails: { flex: 1, minWidth: 0, gap: 4 },
-  recordingAction: { minWidth: 56, minHeight: 40, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
-  renameInput: { width: "100%", minWidth: 0, minHeight: 40, marginTop: 4, backgroundColor: "#0b1220", borderColor: "#334155", borderWidth: 1, borderRadius: 10, color: "#f8fafc", paddingHorizontal: 10, fontSize: 13 },
+  recordingFileName: { minWidth: 0, color: "#f1f5f9", fontSize: 13, fontWeight: "700" },
+  recordingMeta: { color: "#94a3b8", fontSize: 11 },
+  recordingCtaRow: { width: "100%", minWidth: 0, flexDirection: "row", flexWrap: "wrap", gap: 7 },
+  recordingCta: { flex: 1, minWidth: 76, minHeight: 38, alignItems: "center", justifyContent: "center", paddingHorizontal: 8, borderRadius: 10, backgroundColor: "rgba(148,163,184,0.10)", borderWidth: 1, borderColor: "rgba(148,163,184,0.17)" },
+  recordingCtaText: { color: "#dbeafe", fontSize: 12, fontWeight: "700" },
+  recordingCtaPrimary: { backgroundColor: "rgba(37,99,235,0.22)", borderColor: "rgba(96,165,250,0.35)" },
+  recordingCtaPrimaryText: { color: "#bfdbfe", fontSize: 12, fontWeight: "800" },
+  recordingCtaDanger: { backgroundColor: "rgba(127,29,29,0.2)", borderColor: "rgba(248,113,113,0.28)" },
+  recordingCtaDangerText: { color: "#fda4af", fontSize: 12, fontWeight: "800" },
+  deleteModalOverlay: { flex: 1, alignItems: "center", justifyContent: "center", padding: 22, backgroundColor: "rgba(2,6,23,0.78)" },
+  deleteModalCard: { width: "100%", maxWidth: 420, gap: 12, padding: 18, borderRadius: 18, backgroundColor: "#111b2b", borderWidth: 1, borderColor: "rgba(148,163,184,0.2)" },
+  deleteModalActions: { width: "100%", flexDirection: "row", gap: 9, marginTop: 3 },
+  renameInput: { width: "100%", minWidth: 0, minHeight: 42, backgroundColor: "#0b1220", borderColor: "#334155", borderWidth: 1, borderRadius: 10, color: "#f8fafc", paddingHorizontal: 12, fontSize: 14 },
   disabled: { opacity: 0.48 },
   muted: { color: "#94a3b8", fontSize: 13, lineHeight: 19 },
   infoRow: { minHeight: 26, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },

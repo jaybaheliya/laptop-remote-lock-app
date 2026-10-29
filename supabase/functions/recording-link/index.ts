@@ -40,8 +40,10 @@ Deno.serve(async (req: Request) => {
   const { data: { user }, error: authError } = await userClient.auth.getUser();
   if (authError || !user) return jsonResponse({ error: "Invalid or expired session" }, 401);
 
-  let body: { command_id?: string; download?: boolean; file_name?: string };
+  let body: { action?: string; command_id?: string; download?: boolean; file_name?: string };
   try { body = await req.json(); } catch { return jsonResponse({ error: "Invalid JSON body" }, 400); }
+  const action = body.action ?? "link";
+  if (action !== "link" && action !== "delete") return jsonResponse({ error: "Action must be link or delete" }, 400);
   if (typeof body.command_id !== "string" || !uuidPattern.test(body.command_id)) {
     return jsonResponse({ error: "A valid recording id is required" }, 400);
   }
@@ -50,12 +52,28 @@ Deno.serve(async (req: Request) => {
     .from("commands").select("id,device_id,action,status,result")
     .eq("id", body.command_id).eq("user_id", user.id).eq("action", "screen_record").maybeSingle();
   if (commandError) return jsonResponse({ error: "Could not verify recording access" }, 500);
-  const result = command?.result as { storage_path?: unknown; file_name?: unknown } | null;
-  if (!command || command.status !== "completed" || typeof result?.storage_path !== "string" || result.storage_path !== `${command.device_id}/${command.id}.mp4`) {
+  const result = command?.result as { storage_path?: unknown; file_name?: unknown; sent_to_phone?: unknown } | null;
+  if (!command || command.status !== "completed") {
     return jsonResponse({ error: "This recording is not available for this account" }, 404);
   }
 
   const admin = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const expectedPath = `${command.device_id}/${command.id}.mp4`;
+  if (action === "delete") {
+    if (typeof result?.storage_path !== "string") return jsonResponse({ deleted: false });
+    if (result.storage_path !== expectedPath) return jsonResponse({ error: "Invalid private recording path" }, 403);
+    const { error: removeError } = await admin.storage.from("screen-recordings").remove([expectedPath]);
+    if (removeError) return jsonResponse({ error: "Could not delete the private recording" }, 500);
+    const updatedResult = { ...result, storage_path: null, sent_to_phone: false };
+    const { error: updateError } = await admin.from("commands").update({ result: updatedResult })
+      .eq("id", command.id).eq("user_id", user.id);
+    if (updateError) return jsonResponse({ error: "The video was removed, but its recording entry could not be updated" }, 500);
+    return jsonResponse({ deleted: true });
+  }
+
+  if (typeof result?.storage_path !== "string" || result.storage_path !== expectedPath) {
+    return jsonResponse({ error: "This recording is not available for this account" }, 404);
+  }
   const downloadName = typeof body.file_name === "string"
     ? `${body.file_name.replace(/[^a-zA-Z0-9 _.-]/g, "_").replace(/\.mp4$/i, "").slice(0, 80) || "Screen recording"}.mp4`
     : "Screen recording.mp4";

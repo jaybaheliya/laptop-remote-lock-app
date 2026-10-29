@@ -73,7 +73,7 @@ Deno.serve(async (req: Request) => {
   const deviceId = body?.device_id;
   const requestedAction = typeof body?.action === "string" ? body.action.trim().toLowerCase() : "lock";
 
-  const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording"];
+  const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording", "delete_recording"];
   if (!ALLOWED_ACTIONS.includes(requestedAction)) {
     return jsonResponse({ error: `Invalid action. Allowed: ${ALLOWED_ACTIONS.join(", ")}` }, 400);
   }
@@ -111,6 +111,9 @@ Deno.serve(async (req: Request) => {
   }
   if (requestedAction === "rename_recording" && (typeof payload.recording_id !== "string" || !uuidPattern.test(payload.recording_id) || typeof payload.file_name !== "string" || !payload.file_name.toLowerCase().endsWith(".mp4") || typeof payload.new_name !== "string" || !payload.new_name.trim() || payload.new_name.length > 80)) {
     return jsonResponse({ error: "A saved recording and a new name are required" }, 400);
+  }
+  if (requestedAction === "delete_recording" && (typeof payload.recording_id !== "string" || !uuidPattern.test(payload.recording_id) || typeof payload.file_name !== "string" || payload.file_name.length > 140 || !/^[^/\\:\x00-\x1f]+\.mp4$/i.test(payload.file_name))) {
+    return jsonResponse({ error: "A valid saved recording is required" }, 400);
   }
 
   // Verify that this device belongs to the signed-in user.
