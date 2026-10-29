@@ -260,7 +260,7 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
             <Text style={styles.title}>System status</Text>
             <Text style={styles.subtitle}>{detailsExpanded ? "Latest report from the Windows agent" : telemetry.network_name || "Tap to view network and storage"}</Text>
           </View>
-          <Text style={styles.chevron}>{detailsExpanded ? "?" : "+"}</Text>
+          <Text style={styles.chevron}>{detailsExpanded ? "-" : "+"}</Text>
         </TouchableOpacity>
         {detailsExpanded && <>
           <View style={styles.infoRow}><Text style={styles.infoLabel}>Connection</Text><Text style={styles.infoValue}>{telemetry.network_type || "\u2014"}</Text></View>
@@ -274,7 +274,7 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
       <View style={styles.card}>
         <TouchableOpacity style={styles.sectionHeader} onPress={() => setAppsExpanded((value) => !value)} accessibilityRole="button" accessibilityState={{ expanded: appsExpanded }}>
           <View><Text style={styles.title}>Running apps</Text><Text style={styles.subtitle}>{appsExpanded ? "Close a visible app" : "See what is open on your laptop"}</Text></View>
-          <Text style={styles.chevron}>{appsExpanded ? "?" : "+"}</Text>
+          <Text style={styles.chevron}>{appsExpanded ? "-" : "+"}</Text>
         </TouchableOpacity>
         {appsExpanded && <>
           <TouchableOpacity style={[styles.secondaryButton, (!online || taskLoading || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={() => void refreshTasks()} disabled={!online || taskLoading || sending || commandBusy || !!localActiveCommand}>
@@ -293,7 +293,7 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
       <View style={styles.card}>
         <TouchableOpacity style={styles.sectionHeader} onPress={() => setNotesExpanded((value) => !value)} accessibilityRole="button" accessibilityState={{ expanded: notesExpanded }}>
           <View><Text style={styles.title}>Quick notes</Text><Text style={styles.subtitle}>{notes.length ? notes.length + (notes.length === 1 ? " saved note" : " saved notes") : "Write a note for your laptop"}</Text></View>
-          <Text style={styles.chevron}>{notesExpanded ? "?" : "+"}</Text>
+          <Text style={styles.chevron}>{notesExpanded ? "-" : "+"}</Text>
         </TouchableOpacity>
         {notesExpanded && <>
           <TextInput style={styles.input} placeholder="Title (optional)" placeholderTextColor="#8090a5" value={noteTitle} onChangeText={setNoteTitle} maxLength={100} />
