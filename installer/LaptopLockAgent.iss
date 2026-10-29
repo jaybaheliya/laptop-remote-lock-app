@@ -5,7 +5,7 @@
 ; =====================================================================
 
 #define MyAppName "Laptop Remote Lock Agent"
-#define MyAppVersion "1.5.0"
+#define MyAppVersion "1.5.1"
 #define MyAppPublisher "Security Defense Console"
 #define MyAppExeName "start-agent-hidden.vbs"
 
@@ -26,8 +26,10 @@ UninstallDisplayName={#MyAppName}
 SetupIconFile=..\app_icon.ico
 
 [Files]
+; Stop only the installed agent process before replacing agent.js.
+Source: "runner\stop-agent.ps1"; DestDir: "{app}\runner"; Flags: ignoreversion
 ; Agent logic script and system tray
-Source: "..\agent.js"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "..\agent.js"; DestDir: "{app}\app"; Flags: ignoreversion; BeforeInstall: StopExistingAgent
 Source: "..\LaptopLockAgentTray.exe"; DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\tray.ps1"; DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\app_icon.ico"; DestDir: "{app}\app"; Flags: ignoreversion
@@ -52,14 +54,32 @@ Filename: "wscript.exe"; Parameters: """{app}\runner\start-agent-hidden.vbs"""; 
 var
   PairingPage: TInputQueryWizardPage;
 
+procedure StopExistingAgent;
+var
+  ErrorCode: Integer;
+  Params: String;
+begin
+  Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\runner\stop-agent.ps1') + '" -AgentScriptPath "' + ExpandConstant('{app}\app\agent.js') + '"';
+  if not Exec('powershell.exe', Params, '', SW_HIDE, ewWaitUntilTerminated, ErrorCode) or (ErrorCode <> 0) then
+  begin
+    MsgBox('Could not stop the existing Laptop Lock agent safely. Setup has cancelled without changing the installation.', mbError, MB_OK);
+    Abort;
+  end;
+end;
+
 procedure InitializeWizard;
 begin
-  // Create Pairing Key configuration page
-  PairingPage := CreateInputQueryPage(wpSelectDir,
-    'Laptop Pairing Key',
-    'Enter pairing credentials from your controller dashboard',
-    'To link this workstation, paste the Pairing Key generated in the mobile/web controller app:');
-  PairingPage.Add('Pairing Key (Base64 JSON):', False);
+  // Keep existing pairing credentials on upgrades; request a key only on first install.
+  PairingPage := nil;
+  if not FileExists(ExpandConstant('{localappdata}\LaptopLockAgent\config.json')) and
+     not FileExists(ExpandConstant('{localappdata}\LaptopLockAgent\.agent-token')) then
+  begin
+    PairingPage := CreateInputQueryPage(wpSelectDir,
+      'Laptop Pairing Key',
+      'Enter pairing credentials from your controller dashboard',
+      'To link this workstation, paste the Pairing Key generated in the mobile/web controller app:');
+    PairingPage.Add('Pairing Key (Base64 JSON):', False);
+  end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -67,7 +87,7 @@ var
   PairKeyRaw: String;
 begin
   Result := True;
-  if CurPageID = PairingPage.ID then
+  if Assigned(PairingPage) and (CurPageID = PairingPage.ID) then
   begin
     PairKeyRaw := Trim(PairingPage.Values[0]);
     if Length(PairKeyRaw) = 0 then
@@ -89,17 +109,19 @@ begin
     ConfigPath := ConfigDir + '\config.json';
     ForceDirectories(ConfigDir);
 
-    // Terminate any running agent instance so it releases PID lock and reloads new config
-    Exec('taskkill.exe', '/F /IM node.exe /FI "WINDOWTITLE eq LaptopLockAgent*"', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
     Exec('schtasks.exe', '/End /TN "LaptopLockAgent"', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
 
-    PairKeyRaw := Trim(PairingPage.Values[0]);
+    PairKeyRaw := '';
+    if Assigned(PairingPage) then PairKeyRaw := Trim(PairingPage.Values[0]);
     
     // Save configuration JSON into user local app data
     if Length(PairKeyRaw) > 0 then
     begin
       SaveStringToFile(ConfigPath, PairKeyRaw, False);
     end;
+
+    // Let the installed launcher start the updated agent again.
+    DeleteFile(ExpandConstant('{localappdata}\LaptopLockAgent\agent.stop'));
 
     // Secure config folder: restrict ACLs exclusively to current user
     Exec('icacls.exe', '"' + ConfigDir + '" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
