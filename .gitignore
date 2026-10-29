@@ -16,3 +16,5 @@ logs/
 node_modules/
 dist/
 installer/bin/
+.vercel
+.env*

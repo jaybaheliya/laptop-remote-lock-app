@@ -304,6 +304,102 @@ async function callAgentPoll(body) {
   return result;
 }
 
+let cachedTelemetry = null;
+let lastTelemetryFetchTime = 0;
+
+function getSystemTelemetry() {
+  const now = Date.now();
+  if (cachedTelemetry && now - lastTelemetryFetchTime < 15000) return Promise.resolve(cachedTelemetry);
+  const script = String.raw`$ErrorActionPreference='SilentlyContinue'; $drive=$env:SystemDrive; $disk=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'"; $os=Get-CimInstance Win32_OperatingSystem; $profile=Get-NetConnectionProfile | Where-Object {$_.IPv4Connectivity -ne 'Disconnected'} | Select-Object -First 1; $ip=Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254*'} | Select-Object -First 1; [PSCustomObject]@{network_name=if($profile){$profile.Name}else{$null};network_type=if($profile){$profile.NetworkCategory.ToString()}else{'Unknown'};local_ip=if($ip){$ip.IPAddress}else{$null};disk_free_gb=if($disk){[math]::Round($disk.FreeSpace/1GB,2)}else{$null};disk_total_gb=if($disk){[math]::Round($disk.Size/1GB,2)}else{$null};memory_used_gb=if($os){[math]::Round(($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)/1MB,2)}else{$null};memory_total_gb=if($os){[math]::Round($os.TotalVisibleMemorySize/1MB,2)}else{$null}} | ConvertTo-Json -Compress`;
+  return new Promise((resolve) => {
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { shell: false, windowsHide: true });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.once("close", (code) => {
+      if (code === 0 && stdout.trim()) {
+        try {
+          const value = JSON.parse(stdout.trim());
+          cachedTelemetry = {
+            network_name: typeof value.network_name === "string" ? value.network_name : null,
+            network_type: typeof value.network_type === "string" ? value.network_type : "Unknown",
+            local_ip: typeof value.local_ip === "string" ? value.local_ip : null,
+            disk_free_gb: Number.isFinite(value.disk_free_gb) ? value.disk_free_gb : null,
+            disk_total_gb: Number.isFinite(value.disk_total_gb) ? value.disk_total_gb : null,
+            memory_used_gb: Number.isFinite(value.memory_used_gb) ? value.memory_used_gb : null,
+            memory_total_gb: Number.isFinite(value.memory_total_gb) ? value.memory_total_gb : null,
+          };
+          lastTelemetryFetchTime = now;
+        } catch {}
+      }
+      resolve(cachedTelemetry);
+    });
+    child.once("error", () => resolve(cachedTelemetry));
+  });
+}
+
+function runPowerShell(script, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], { shell: false, windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    const timerId = setTimeout(() => { child.kill(); reject(new Error("Windows command timed out")); }, timeoutMs);
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.once("error", (error) => { clearTimeout(timerId); reject(error); });
+    child.once("close", (code) => {
+      clearTimeout(timerId);
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(stderr.trim().slice(0, 250) || `PowerShell exited with code ${code}`));
+    });
+  });
+}
+
+async function getRunningTasks() {
+  const output = await runPowerShell("Get-Process | Where-Object {$_.MainWindowTitle} | Sort-Object ProcessName | Select-Object -First 50 @{n='process_id';e={$_.Id}},@{n='name';e={$_.ProcessName}},@{n='window';e={$_.MainWindowTitle}},@{n='memory_mb';e={[math]::Round($_.WorkingSet64/1MB)}} | ConvertTo-Json -Compress");
+  if (!output) return [];
+  const parsed = JSON.parse(output);
+  return (Array.isArray(parsed) ? parsed : [parsed]).map((task) => ({
+    process_id: Number(task.process_id),
+    name: String(task.name || "Application").slice(0, 100),
+    window: String(task.window || "").slice(0, 180),
+    memory_mb: Number(task.memory_mb) || 0,
+  })).filter((task) => Number.isInteger(task.process_id) && task.process_id > 0);
+}
+
+async function endUserTask(processId, expectedName) {
+  if (!Number.isInteger(processId) || processId <= 0 || processId === process.pid || typeof expectedName !== "string" || !expectedName.trim() || expectedName.length > 100) throw new Error("Invalid or protected process selection");
+  const expectedNameBase64 = Buffer.from(expectedName, "utf8").toString("base64");
+  const script = `$p=Get-Process -Id ${processId} -ErrorAction Stop; $expected=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${expectedNameBase64}')); $protected=@('System','Idle','csrss','wininit','winlogon','services','lsass','smss','svchost','dwm','LaptopLockAgentTray'); if($p.ProcessName -ine $expected -or $protected -contains $p.ProcessName -or -not $p.MainWindowTitle){throw 'Only the selected visible user application can be ended'}; [void]$p.CloseMainWindow(); if(-not $p.WaitForExit(3000)){ $p.Refresh(); if($p.MainWindowHandle -eq 0){throw 'The application did not close; force stop was prevented'}; $p.Kill(); $p.WaitForExit() }; 'closed'`;
+  await runPowerShell(script, 10000);
+  return { process_id: processId, ended: true };
+}
+
+async function showWindowsMessage(message, title = "Message from your phone") {
+  const safeMessage = String(message).slice(0, 500);
+  const safeTitle = String(title).slice(0, 80);
+  const messageBase64 = Buffer.from(safeMessage, "utf8").toString("base64");
+  const titleBase64 = Buffer.from(safeTitle, "utf8").toString("base64");
+  const script = `$m=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${messageBase64}')); $t=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${titleBase64}')); Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show($m,$t,'OK','Information') | Out-Null`;
+  await runPowerShell(script, 120000);
+}
+
+async function saveLaptopNote(title, body) {
+  const safeTitle = String(title).trim().slice(0, 100) || "Quick note";
+  const safeBody = String(body).trim().slice(0, 5000);
+  if (!safeBody) throw new Error("Note cannot be empty");
+  const folder = path.join(os.homedir(), "Documents", "Laptop Lock Notes");
+  fs.mkdirSync(folder, { recursive: true });
+  const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}_${safeTitle.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")}.txt`;
+  fs.writeFileSync(path.join(folder, fileName), `${safeTitle}\r\n\r\n${safeBody}`, "utf8");
+  const psValue = (value) => Buffer.from(value, "utf8").toString("base64");
+  const windowScript = `$title=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psValue(safeTitle)}')); $body=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psValue(safeBody)}')); Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $form=New-Object Windows.Forms.Form; $form.Text=$title; $form.Size=New-Object Drawing.Size(360,380); $form.StartPosition='CenterScreen'; $form.BackColor=[Drawing.Color]::FromArgb(255,247,174); $form.TopMost=$true; $label=New-Object Windows.Forms.Label; $label.Text=$title; $label.Font=New-Object Drawing.Font('Segoe UI',13,[Drawing.FontStyle]::Bold); $label.Location=New-Object Drawing.Point(16,14); $label.Size=New-Object Drawing.Size(310,30); $text=New-Object Windows.Forms.TextBox; $text.Multiline=$true; $text.ReadOnly=$true; $text.ScrollBars='Vertical'; $text.BorderStyle='None'; $text.BackColor=$form.BackColor; $text.Font=New-Object Drawing.Font('Segoe UI',11); $text.Location=New-Object Drawing.Point(16,52); $text.Size=New-Object Drawing.Size(310,270); $text.Text=$body; $form.Controls.Add($label); $form.Controls.Add($text); [Windows.Forms.Application]::Run($form)`;
+  const encodedScript = Buffer.from(windowScript, "utf16le").toString("base64");
+  const noteWindow = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript], { shell: false, windowsHide: true, detached: true, stdio: "ignore" });
+  noteWindow.unref();
+  return { saved: true, location: "Documents/Laptop Lock Notes", file_name: fileName };
+}
+
 function lockWindows() {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -535,7 +631,7 @@ function unlockOrWakeWindows() {
   });
 }
 
-const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock"];
+const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note"];
 
 let cachedBattery = null;
 let lastBatteryFetchTime = 0;
@@ -593,7 +689,8 @@ async function pollOnce() {
 
   try {
     const battery = await getBatteryStatus();
-    const result = await callAgentPoll({ action: "poll", battery });
+    const telemetry = await getSystemTelemetry();
+    const result = await callAgentPoll({ action: "poll", battery, telemetry });
     const command = result.command;
     if (!command) return;
 
@@ -624,6 +721,7 @@ async function pollOnce() {
     let status = "completed";
     let failureReason = null;
     let imageData = null;
+    let commandResult = null;
 
     if (action === "sleep") {
       // For sleep, we notify Supabase that it was completed BEFORE putting the machine into sleep,
@@ -655,6 +753,54 @@ async function pollOnce() {
           error instanceof Error ? error.message : "Screen capture execution failed";
         console.error("Could not capture screen:", failureReason);
       }
+    } else if (action === "panic") {
+      let wasLocked = false;
+      try {
+        imageData = await captureScreen();
+      } catch (error) {
+        status = "failed";
+        failureReason = `Screenshot failed: ${error instanceof Error ? error.message : "unknown error"}`;
+      }
+      try {
+        await lockWindows();
+        wasLocked = true;
+      } catch (error) {
+        status = "failed";
+        const lockError = error instanceof Error ? error.message : "unknown error";
+        failureReason = `${failureReason ? `${failureReason}; ` : ""}Lock failed: ${lockError}`;
+      }
+      commandResult = { locked: wasLocked, screenshot_captured: Boolean(imageData) };
+    } else if (action === "task_list") {
+      try {
+        commandResult = { tasks: await getRunningTasks() };
+      } catch (error) {
+        status = "failed";
+        failureReason = error instanceof Error ? error.message : "Could not list running applications";
+      }
+    } else if (action === "end_task") {
+      try {
+        commandResult = await endUserTask(Number(command.payload?.process_id), String(command.payload?.process_name || ""));
+      } catch (error) {
+        status = "failed";
+        failureReason = error instanceof Error ? error.message : "Could not end application";
+      }
+    } else if (action === "display_message") {
+      try {
+        await showWindowsMessage(String(command.payload?.message || ""));
+        commandResult = { displayed: true };
+      } catch (error) {
+        status = "failed";
+        failureReason = error instanceof Error ? error.message : "Could not display message";
+      }
+    } else if (action === "save_note") {
+      try {
+        commandResult = await saveLaptopNote(String(command.payload?.title || "Quick note"), String(command.payload?.body || ""));
+      } catch (error) {
+        status = "failed";
+        failureReason = error instanceof Error ? error.message : "Could not save note on laptop";
+      }
+    } else if (action === "refresh_status") {
+      commandResult = { telemetry };
     } else if (action === "unlock") {
       try {
         console.log("Sending display wake signal...");
@@ -696,6 +842,7 @@ async function pollOnce() {
     if (imageData) {
       payload.image_data = imageData;
     }
+    if (commandResult) payload.result = commandResult;
 
     if (failureReason) {
       // Sanitize failure reason (strip non-printable characters, limit to 255 chars)

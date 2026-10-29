@@ -17,6 +17,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
+import { RemoteFeatures } from "../components/remote-features";
 
 type Device = {
   id: string;
@@ -26,6 +27,13 @@ type Device = {
   battery_level?: number | null;
   is_charging?: boolean | null;
   power_online?: boolean | null;
+  network_name?: string | null;
+  network_type?: string | null;
+  local_ip?: string | null;
+  disk_free_gb?: number | null;
+  disk_total_gb?: number | null;
+  memory_used_gb?: number | null;
+  memory_total_gb?: number | null;
   rdp_host?: string | null;
   rdp_port?: number | null;
 };
@@ -155,20 +163,33 @@ export default function HomeScreen() {
       }
 
       try {
-        const { data, error } = await supabase
+        const telemetryResponse = await supabase
           .from("devices")
-          .select("id, name, platform, last_seen_at, battery_level, is_charging, power_online, rdp_host, rdp_port")
+          .select("id, name, platform, last_seen_at, battery_level, is_charging, power_online, rdp_host, rdp_port, network_name, network_type, local_ip, disk_free_gb, disk_total_gb, memory_used_gb, memory_total_gb")
           .eq("user_id", userId)
           .order("created_at", { ascending: false });
+        let deviceData = telemetryResponse.data as Device[] | null;
+        let deviceErrorMessage = telemetryResponse.error?.message ?? null;
+
+        // Keep the existing controller usable until the telemetry migration is applied.
+        if (telemetryResponse.error && /column .* does not exist|schema cache/i.test(telemetryResponse.error.message)) {
+          const legacyResponse = await supabase
+            .from("devices")
+            .select("id, name, platform, last_seen_at, battery_level, is_charging, power_online, rdp_host, rdp_port")
+            .eq("user_id", userId)
+            .order("created_at", { ascending: false });
+          deviceData = legacyResponse.data as Device[] | null;
+          deviceErrorMessage = legacyResponse.error?.message ?? null;
+        }
 
         if (!isMountedRef.current) return null;
 
-        if (error) {
-          setMessage(`Could not load laptop: ${error.message}`);
+        if (deviceErrorMessage) {
+          setMessage(`Could not load laptop: ${deviceErrorMessage}`);
           return null;
         }
 
-        const devices = (data ?? []) as Device[];
+        const devices = deviceData ?? [];
         setDeviceList(devices);
 
         // Keep current selected device if it still exists; otherwise default to primary or first
@@ -207,7 +228,7 @@ export default function HomeScreen() {
           .select("id, action, status, created_at, failure_reason")
           .eq("device_id", deviceId)
           .eq("user_id", userId)
-          .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock"])
+          .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note"])
           .order("created_at", { ascending: false })
           .limit(10);
 
@@ -1574,6 +1595,14 @@ export default function HomeScreen() {
                     </TouchableOpacity>
                   </View>
 
+                  <RemoteFeatures
+                    deviceId={device.id}
+                    userId={session.user.id}
+                    telemetry={device}
+                    online={heartbeat.status === "online"}
+                    commandBusy={isCommandActive || actionSubmitting !== null}
+                  />
+
                   {isCommandActive && (
                     <View style={styles.inProgressBanner}>
                       <Text style={styles.inProgressBannerText}>
@@ -1742,7 +1771,20 @@ export default function HomeScreen() {
                             <Text style={styles.historyActionName}>
                               {(() => {
                                 const act = (cmd.action || "lock").toLowerCase();
-                                const label = act === "sleep" ? "Sleep" : act === "shutdown" ? "Shutdown" : "Lock";
+                                const labels: Record<string, string> = {
+                                  lock: "Lock",
+                                  sleep: "Sleep",
+                                  shutdown: "Shutdown",
+                                  screenshot: "Screenshot",
+                                  unlock: "Wake screen",
+                                  panic: "Panic capture & lock",
+                                  display_message: "Display message",
+                                  task_list: "Refresh running apps",
+                                  end_task: "End task",
+                                  refresh_status: "Refresh status",
+                                  save_note: "Save quick note",
+                                };
+                                const label = labels[act] || act;
                                 if (cmd.status === "completed") return `${label} Executed`;
                                 if (cmd.status === "failed") return `${label} Failed`;
                                 if (cmd.status === "claimed") return `${label} In Progress`;

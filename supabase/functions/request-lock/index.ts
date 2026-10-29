@@ -62,7 +62,7 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Invalid or expired session" }, 401);
   }
 
-  let body: { device_id?: string; action?: string };
+  let body: { device_id?: string; action?: string; payload?: Record<string, unknown> };
 
   try {
     body = await req.json();
@@ -73,7 +73,7 @@ Deno.serve(async (req: Request) => {
   const deviceId = body?.device_id;
   const requestedAction = typeof body?.action === "string" ? body.action.trim().toLowerCase() : "lock";
 
-  const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock"];
+  const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note"];
   if (!ALLOWED_ACTIONS.includes(requestedAction)) {
     return jsonResponse({ error: `Invalid action. Allowed: ${ALLOWED_ACTIONS.join(", ")}` }, 400);
   }
@@ -83,6 +83,25 @@ Deno.serve(async (req: Request) => {
 
   if (typeof deviceId !== "string" || !uuidPattern.test(deviceId)) {
     return jsonResponse({ error: "A valid device_id is required" }, 400);
+  }
+
+  const payload = body.payload && typeof body.payload === "object" && !Array.isArray(body.payload)
+    ? body.payload
+    : {};
+  if (JSON.stringify(payload).length > 6000) {
+    return jsonResponse({ error: "Command payload is too large" }, 400);
+  }
+  if (requestedAction === "display_message" && (typeof payload.message !== "string" || !payload.message.trim() || payload.message.length > 500)) {
+    return jsonResponse({ error: "A message of 1 to 500 characters is required" }, 400);
+  }
+  if (requestedAction === "end_task" && (!Number.isInteger(payload.process_id) || Number(payload.process_id) <= 0)) {
+    return jsonResponse({ error: "A valid process ID is required" }, 400);
+  }
+  if (requestedAction === "end_task" && (typeof payload.process_name !== "string" || !payload.process_name.trim() || payload.process_name.length > 100)) {
+    return jsonResponse({ error: "A valid process name is required" }, 400);
+  }
+  if (requestedAction === "save_note" && (typeof payload.title !== "string" || !payload.title.trim() || payload.title.length > 100 || typeof payload.body !== "string" || !payload.body.trim() || payload.body.length > 5000)) {
+    return jsonResponse({ error: "A note title and body are required" }, 400);
   }
 
   // Verify that this device belongs to the signed-in user.
@@ -110,8 +129,9 @@ Deno.serve(async (req: Request) => {
       user_id: user.id,
       action: requestedAction,
       status: "pending",
+      payload,
     })
-    .select("id, device_id, action, status, created_at")
+    .select("id, device_id, action, status, created_at, payload")
     .single();
 
   if (insertError) {

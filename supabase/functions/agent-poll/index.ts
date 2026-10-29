@@ -71,10 +71,20 @@ Deno.serve(async (req: Request) => {
     status?: string;
     failure_reason?: string;
     image_data?: string;
+    result?: Record<string, unknown>;
     battery?: {
       level?: number;
       is_charging?: boolean;
       power_online?: boolean;
+    };
+    telemetry?: {
+      network_name?: string | null;
+      network_type?: string | null;
+      local_ip?: string | null;
+      disk_free_gb?: number | null;
+      disk_total_gb?: number | null;
+      memory_used_gb?: number | null;
+      memory_total_gb?: number | null;
     };
   };
 
@@ -149,6 +159,20 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    if (body.telemetry && typeof body.telemetry === "object") {
+      const t = body.telemetry;
+      for (const key of ["network_name", "network_type", "local_ip"] as const) {
+        if (typeof t[key] === "string" || t[key] === null) {
+          deviceUpdatePayload[key] = typeof t[key] === "string" ? t[key].slice(0, 100) : null;
+        }
+      }
+      for (const key of ["disk_free_gb", "disk_total_gb", "memory_used_gb", "memory_total_gb"] as const) {
+        if (typeof t[key] === "number" && Number.isFinite(t[key])) {
+          deviceUpdatePayload[key] = Math.max(0, Math.min(100000, Math.round(t[key] * 100) / 100));
+        }
+      }
+    }
+
     const [credResult, deviceResult] = await Promise.all([
       admin
         .from("device_agent_credentials")
@@ -180,10 +204,10 @@ Deno.serve(async (req: Request) => {
       // Find the oldest pending command (lock, sleep, shutdown) for this laptop.
       const { data: pending, error: pendingError } = await admin
         .from("commands")
-        .select("id, device_id, action, status, created_at")
+        .select("id, device_id, action, status, created_at, payload")
         .eq("device_id", deviceId)
         .eq("user_id", userId)
-        .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock"])
+        .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note"])
         .eq("status", "pending")
         .order("created_at", { ascending: true })
         .limit(1)
@@ -206,7 +230,7 @@ Deno.serve(async (req: Request) => {
         .eq("device_id", deviceId)
         .eq("user_id", userId)
         .eq("status", "pending")
-        .select("id, device_id, action, status, created_at")
+        .select("id, device_id, action, status, created_at, payload")
         .maybeSingle();
 
       if (claimError) {
@@ -230,6 +254,11 @@ Deno.serve(async (req: Request) => {
       status: body.status,
     };
 
+    if (body.result && typeof body.result === "object" && !Array.isArray(body.result)) {
+      const serializedResult = JSON.stringify(body.result);
+      if (serializedResult.length <= 20000) updatePayload.result = body.result;
+    }
+
     if (typeof body.failure_reason === "string" && body.status === "failed") {
       updatePayload.failure_reason = body.failure_reason
         .replace(/[^\x20-\x7E]/g, "")
@@ -244,7 +273,7 @@ Deno.serve(async (req: Request) => {
       .eq("device_id", deviceId)
       .eq("user_id", userId)
       .eq("status", "claimed")
-      .select("id, device_id, action, status, created_at")
+      .select("id, device_id, action, status, created_at, result")
       .maybeSingle();
 
     if (updateError && updateError.message?.includes("failure_reason")) {
@@ -255,7 +284,7 @@ Deno.serve(async (req: Request) => {
         .eq("device_id", deviceId)
         .eq("user_id", userId)
         .eq("status", "claimed")
-        .select("id, device_id, action, status, created_at")
+        .select("id, device_id, action, status, created_at, result")
         .maybeSingle();
 
       updated = fallback.data;
@@ -274,12 +303,8 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // If this was a screenshot command and returned image_data, persist to screenshots table
-    if (
-      body.status === "completed" &&
-      typeof body.image_data === "string" &&
-      body.image_data.length > 50
-    ) {
+    // Persist screenshots even if a combined panic command had a separate lock failure.
+    if (typeof body.image_data === "string" && body.image_data.length > 50) {
       const { error: ssError } = await admin
         .from("screenshots")
         .insert({

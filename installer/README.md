@@ -1,6 +1,6 @@
 # Laptop Remote Lock Agent — Windows Installer Build Guide
 
-This directory packages the background Windows workstation agent into a single, clean `.exe` installer using **Inno Setup 6 (x64)**.
+This directory packages the background Windows workstation agent into a single, clean `.exe` installer using **Inno Setup 6 (x64)**. Installer version `1.1.0` includes the current agent implementation and bundled Node.js runtime.
 
 ---
 
@@ -10,8 +10,8 @@ This directory packages the background Windows workstation agent into a single, 
   - Installs directly to `%LOCALAPPDATA%\Programs\LaptopLockAgent`.
   - Runs with standard user privileges—**No UAC Administrator elevation required**.
   - Ensures the agent executes in the interactive user desktop session where Windows `LockWorkStation` functions correctly.
-- **Portable Node.js Runtime (Zero Dependency Requirement):**
-  - Works on clean Windows 10/11 machines without requiring Node.js to be installed globally on the target machine.
+- **Portable Node.js Runtime:**
+  - `installer/bin/node.exe` is included, so the target machine does not need Node.js installed globally.
 - **Secure Dynamic Pairing:**
   - The installer prompts for the **Pairing Key** generated when clicking **"+ Add Laptop"** on the dashboard.
   - The configuration file is stored in `%LOCALAPPDATA%\LaptopLockAgent\config.json`.
@@ -29,7 +29,7 @@ This directory packages the background Windows workstation agent into a single, 
 ```text
 installer/
 ├── bin/
-│   └── node.exe                 <-- Optional: Download standalone node.exe here (for 100% standalone setup)
+│   └── node.exe                 <-- Bundled Windows Node.js runtime
 ├── runner/
 │   ├── start-agent.bat          <-- Dynamic path resolver & 5MB log rotator
 │   └── start-agent-hidden.vbs   <-- Invisible VBScript runner
@@ -44,17 +44,11 @@ installer/
 ### Step 1: Install Inno Setup 6
 Download and install [Inno Setup 6](https://jrsoftware.org/isdl.php) (free & open source).
 
-### Step 2: (Optional but Recommended) Download Portable `node.exe`
-To make the installer self-contained so target PCs don't need Node.js:
-1. Create a `bin` folder inside `installer/`:
-   ```powershell
-   mkdir installer\bin
-   ```
-2. Download the official 64-bit `node.exe` (v20 LTS recommended):
-   ```powershell
-   Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.0/win-x64/node.exe" -OutFile "installer\bin\node.exe"
-   ```
-*(Note: If `installer\bin\node.exe` is omitted, the installer will compile fine and fallback to using system `node` on target PCs).*
+### Step 2: Verify the bundled runtime
+The repository includes `installer/bin/node.exe`. Check it with:
+```powershell
+& installer\bin\node.exe --version
+```
 
 ### Step 3: Compile with Inno Setup Compiler
 Run the Inno Setup command-line compiler:
@@ -63,14 +57,18 @@ Run the Inno Setup command-line compiler:
 ```
 *Or open `LaptopLockAgent.iss` in the Inno Setup GUI and click **Build -> Compile** (Ctrl+F9).*
 
-The resulting standalone setup package will be generated at:
+The resulting setup package will be generated at:
 ```text
 installer\Output\LaptopLockAgentSetup.exe
 ```
 
 ---
 
-## 4. Workstation Onboarding & Pairing Walkthrough
+## 4. Updating an existing installation
+
+Run `update-agent.bat` from the repository root on the Windows workstation. It stops the installed agent, copies the current `agent.js` and runner scripts, then restarts the scheduled task (or launches the runner if the task is unavailable). It preserves the pairing configuration.
+
+## 5. Workstation Onboarding & Pairing Walkthrough
 
 1. Open the **Laptop Remote Lock Controller** web or mobile app.
 2. Sign in and click **"+ Add Laptop"** in the top navigation.
@@ -79,5 +77,7 @@ installer\Output\LaptopLockAgentSetup.exe
 5. Click **"📋 Copy Pairing Key"**.
 6. On the target Windows laptop, run `LaptopLockAgentSetup.exe`.
 7. Paste the Pairing Key into the setup wizard and complete the installation.
-8. The workstation is paired and immediately reports `AGENT ONLINE` on the dashboard!
+8. The workstation is paired and reports online on the dashboard. The controller supports network, storage, and memory status; typed messages; panic screenshot-and-lock; visible-app task listing and end-task requests; and quick notes saved on the workstation.
+
+Quick notes are saved to the user's Documents folder and shown in the agent's built-in note window; they are not saved to Microsoft's Sticky Notes application.
 
