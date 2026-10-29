@@ -196,7 +196,32 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
     setNoteBody("");
     setNotesLoading(false);
     const commandId = await sendCommand("save_note", { title, body });
-    if (commandId) Alert.alert("Note saved", "It is synced to your account, opens in a sticky-note window, and is saved in Documents/Laptop Lock Notes.");
+    if (!commandId) return;
+    try {
+      for (let attempt = 0; attempt < 18; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const { data: command, error: commandError } = await supabase
+          .from("commands")
+          .select("status,result,failure_reason")
+          .eq("id", commandId)
+          .eq("user_id", userId)
+          .maybeSingle();
+        if (commandError) throw commandError;
+        if (command?.status === "failed") throw new Error(command.failure_reason || "The laptop could not open the note.");
+        if (command?.status === "completed") {
+          setLocalActiveCommand(null);
+          const result = command.result as { display_method?: string } | null;
+          const location = result?.display_method === "text_editor_fallback"
+            ? "It opened in Notepad because the sticky-note window could not start."
+            : "It opened in a sticky-note window.";
+          Alert.alert("Note delivered", `${location} A copy is saved in Documents/Laptop Lock Notes.`);
+          return;
+        }
+      }
+      Alert.alert("Note saved, delivery pending", "The note is saved to your account, but the laptop has not confirmed it yet. Try Send again when the laptop agent is online.");
+    } catch (error) {
+      Alert.alert("Note saved, delivery failed", error instanceof Error ? error.message : "The laptop could not confirm delivery. Try Send again.");
+    }
   }
 
   async function deleteNote(noteId: string) {
@@ -249,7 +274,7 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
       </View>
 
       <View style={styles.card}>
-        <View style={styles.heading}><Text style={styles.title}>Quick notes</Text><Text style={styles.subtitle}>Write on mobile, then open a sticky-note window on this laptop</Text></View>
+        <View style={styles.heading}><Text style={styles.title}>Quick notes</Text><Text style={styles.subtitle}>Write on mobile, then open on this laptop as a sticky note or in Notepad</Text></View>
         <TextInput style={styles.input} placeholder="Title (optional)" placeholderTextColor="#8090a5" value={noteTitle} onChangeText={setNoteTitle} maxLength={100} />
         <TextInput style={[styles.input, styles.noteBody]} placeholder="Your note…" placeholderTextColor="#8090a5" value={noteBody} onChangeText={setNoteBody} maxLength={5000} multiline textAlignVertical="top" />
         <TouchableOpacity style={[styles.primaryButton, (notesLoading || !noteBody.trim()) && styles.disabled]} onPress={() => void saveNote()} disabled={notesLoading || !noteBody.trim()}>

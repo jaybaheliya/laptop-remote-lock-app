@@ -1,6 +1,6 @@
 # Laptop Remote Lock Agent — Windows Installer Build Guide
 
-This directory packages the background Windows workstation agent into a single, clean `.exe` installer using **Inno Setup 6 (x64)**. Installer version `1.1.0` includes the current agent implementation and bundled Node.js runtime.
+This directory packages the background Windows workstation agent into a single, clean `.exe` installer using **Inno Setup 6 (x64)**. Installer version `1.2.0` includes the current agent implementation and bundled Node.js runtime.
 
 ---
 
