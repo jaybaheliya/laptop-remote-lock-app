@@ -633,7 +633,146 @@ function unlockOrWakeWindows() {
   });
 }
 
-const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note"];
+const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording"];
+
+let screenRecordingSession = null;
+
+function toggleWindowsScreenRecording() {
+  const script = `Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public static class GameBarRecordingHotkey {
+  [DllImport("user32.dll")] private static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+  public static void Toggle() {
+    keybd_event(0x5B, 0, 0, UIntPtr.Zero); Thread.Sleep(80);
+    keybd_event(0x12, 0, 0, UIntPtr.Zero); Thread.Sleep(80);
+    keybd_event(0x52, 0, 0, UIntPtr.Zero); Thread.Sleep(120);
+    keybd_event(0x52, 0, 2, UIntPtr.Zero);
+    keybd_event(0x12, 0, 2, UIntPtr.Zero);
+    keybd_event(0x5B, 0, 2, UIntPtr.Zero);
+  }
+}
+"@ -ErrorAction Stop; [GameBarRecordingHotkey]::Toggle()`;
+  return runPowerShell(script, 10000);
+}
+
+function getGameBarCaptureFolder() {
+  return path.join(os.homedir(), "Videos", "Captures");
+}
+
+async function startScreenRecording(payload = {}, commandId) {
+  if (screenRecordingSession) throw new Error("A screen recording is already active. Stop it before starting another.");
+  const packageState = await runPowerShell("$p=Get-AppxPackage Microsoft.XboxGamingOverlay; if(-not $p){throw 'Xbox Game Bar is not installed for this Windows user'}; $p.Version.ToString()");
+  if (!packageState) throw new Error("Xbox Game Bar is unavailable");
+  const title = String(payload.name || "Screen recording").trim().slice(0, 80) || "Screen recording";
+  const maxSeconds = Math.max(15, Math.min(60, Number(payload.max_seconds) || 60));
+  const startedAt = Date.now();
+  await toggleWindowsScreenRecording();
+  screenRecordingSession = {
+    title,
+    startCommandId: commandId,
+    startedAt,
+    maxSeconds,
+    sendToPhone: payload.send_to_phone === true,
+    autoStopTimer: null,
+  };
+  screenRecordingSession.autoStopTimer = setTimeout(() => {
+    stopScreenRecording(null, true).catch((error) => console.error("Automatic screen recording stop failed:", error.message));
+  }, maxSeconds * 1000);
+  return { recording: true, started_at: new Date(startedAt).toISOString(), max_seconds: maxSeconds, visible_indicator: "Xbox Game Bar" };
+}
+
+function safeRecordingTitle(value) {
+  return String(value || "Screen recording").trim().slice(0, 80).replace(/[<>:"/\\|?*\x00-\x1F]/g, "_") || "Screen recording";
+}
+
+async function waitForCompletedGameBarCapture(startedAt) {
+  const folder = getGameBarCaptureFolder();
+  const deadline = Date.now() + 20000;
+  let stablePath = null;
+  let stableSize = -1;
+  let stableChecks = 0;
+  while (Date.now() < deadline) {
+    let candidates = [];
+    try {
+      candidates = fs.readdirSync(folder)
+        .filter((name) => name.toLowerCase().endsWith(".mp4"))
+        .map((name) => path.join(folder, name))
+        .map((file) => ({ file, stat: fs.statSync(file) }))
+        .filter(({ stat }) => stat.mtimeMs >= startedAt - 5000 && stat.size > 0)
+        .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+    } catch {
+      // Game Bar may create this folder only when the first capture is saved.
+    }
+    const newest = candidates[0];
+    if (newest && newest.file === stablePath && newest.stat.size === stableSize) stableChecks++;
+    else { stablePath = newest?.file || null; stableSize = newest?.stat.size || -1; stableChecks = newest ? 1 : 0; }
+    if (newest && stableChecks >= 3) return newest.file;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error("Xbox Game Bar did not finish a video file. Check that recording is enabled in Windows and that an app is open to capture.");
+}
+
+async function uploadScreenRecording(filePath, commandId, startCommandId) {
+  const stat = fs.statSync(filePath);
+  if (stat.size <= 0 || stat.size > 150 * 1024 * 1024) throw new Error("Recording must be between 1 byte and 150 MB to send to the phone.");
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/recording-transfer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: config.supabasePublishableKey, Authorization: `Bearer ${deviceToken}` },
+    body: JSON.stringify({ action: "create_upload", command_id: commandId, start_command_id: startCommandId, file_name: path.basename(filePath), file_size: stat.size }),
+    signal: AbortSignal.timeout(20000),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.signed_url || !result.storage_path) throw new Error(result.error || "Could not prepare a private upload for this recording.");
+  const uploadResponse = await fetch(result.signed_url, {
+    method: "PUT",
+    headers: { apikey: config.supabasePublishableKey, "Content-Type": "video/mp4", "x-upsert": "false" },
+    body: fs.readFileSync(filePath),
+    signal: AbortSignal.timeout(180000),
+  });
+  if (!uploadResponse.ok) throw new Error(`Private video upload failed (${uploadResponse.status}).`);
+  return result.storage_path;
+}
+
+async function stopScreenRecording(commandId = null, automatic = false) {
+  const session = screenRecordingSession;
+  if (!session) throw new Error("There is no active screen recording to stop.");
+  clearTimeout(session.autoStopTimer);
+  screenRecordingSession = null;
+  await toggleWindowsScreenRecording();
+  const capturePath = await waitForCompletedGameBarCapture(session.startedAt);
+  const outputFolder = path.join(os.homedir(), "Videos", "Laptop Lock Recordings");
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const fileName = `${timestamp}_${safeRecordingTitle(session.title)}.mp4`;
+  const localPath = path.join(outputFolder, fileName);
+  fs.renameSync(capturePath, localPath);
+  const result = { recording: false, saved_locally: true, local_path: localPath, file_name: fileName, duration_seconds: Math.max(1, Math.round((Date.now() - session.startedAt) / 1000)), automatically_stopped: automatic, sent_to_phone: false };
+  if (session.sendToPhone && commandId) {
+    try {
+      result.storage_path = await uploadScreenRecording(localPath, commandId, session.startCommandId);
+      result.sent_to_phone = true;
+    } catch (error) {
+      result.send_error = error instanceof Error ? error.message : "Upload failed";
+    }
+  }
+  return result;
+}
+
+function renameSavedRecording(fileName, newName, recordingId) {
+  if (typeof recordingId !== "string" || !/^[0-9a-f-]{36}$/i.test(recordingId)) throw new Error("Invalid recording selection");
+  if (typeof fileName !== "string" || path.basename(fileName) !== fileName || !fileName.toLowerCase().endsWith(".mp4")) throw new Error("Invalid recording file name");
+  const folder = path.resolve(os.homedir(), "Videos", "Laptop Lock Recordings");
+  const source = path.resolve(folder, fileName);
+  if (path.dirname(source) !== folder || !fs.existsSync(source)) throw new Error("The local recording could not be found");
+  const nextName = `${safeRecordingTitle(newName)}.mp4`;
+  const destination = path.resolve(folder, nextName);
+  if (path.dirname(destination) !== folder) throw new Error("Invalid new recording name");
+  if (fs.existsSync(destination) && source.toLowerCase() !== destination.toLowerCase()) throw new Error("A recording with that name already exists");
+  fs.renameSync(source, destination);
+  return { renamed: true, recording_id: recordingId, old_file_name: fileName, file_name: nextName, local_path: destination };
+}
 
 let cachedBattery = null;
 let lastBatteryFetchTime = 0;
@@ -800,6 +939,24 @@ async function pollOnce() {
       } catch (error) {
         status = "failed";
         failureReason = error instanceof Error ? error.message : "Could not save note on laptop";
+      }
+    } else if (action === "screen_record") {
+      try {
+        const mode = String(command.payload?.mode || "");
+        if (mode === "start") commandResult = await startScreenRecording(command.payload || {}, command.id);
+        else if (mode === "stop") commandResult = await stopScreenRecording(command.id);
+        else if (mode === "status") commandResult = { recording: Boolean(screenRecordingSession), started_at: screenRecordingSession ? new Date(screenRecordingSession.startedAt).toISOString() : null, max_seconds: screenRecordingSession?.maxSeconds || null };
+        else throw new Error("Recording mode must be start, stop, or status");
+      } catch (error) {
+        status = "failed";
+        failureReason = error instanceof Error ? error.message : "Could not record the laptop screen";
+      }
+    } else if (action === "rename_recording") {
+      try {
+        commandResult = renameSavedRecording(String(command.payload?.file_name || ""), String(command.payload?.new_name || ""), String(command.payload?.recording_id || ""));
+      } catch (error) {
+        status = "failed";
+        failureReason = error instanceof Error ? error.message : "Could not rename the recording";
       }
     } else if (action === "refresh_status") {
       commandResult = { telemetry };

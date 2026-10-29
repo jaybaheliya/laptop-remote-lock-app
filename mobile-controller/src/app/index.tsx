@@ -228,7 +228,7 @@ export default function HomeScreen() {
           .select("id, action, status, created_at, failure_reason")
           .eq("device_id", deviceId)
           .eq("user_id", userId)
-          .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note"])
+          .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording"])
           .order("created_at", { ascending: false })
           .limit(10);
 
@@ -242,7 +242,7 @@ export default function HomeScreen() {
             .select("id, action, status, created_at")
             .eq("device_id", deviceId)
             .eq("user_id", userId)
-            .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock"])
+            .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "screen_record", "rename_recording"])
             .order("created_at", { ascending: false })
             .limit(10);
 
@@ -1783,6 +1783,8 @@ export default function HomeScreen() {
                                   end_task: "End task",
                                   refresh_status: "Refresh status",
                                   save_note: "Save quick note",
+                                  screen_record: "Screen recording",
+                                  rename_recording: "Rename recording",
                                 };
                                 const label = labels[act] || act;
                                 if (cmd.status === "completed") return `${label} Executed`;

@@ -2,8 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Platform,
+  Share,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   TouchableOpacity,
@@ -23,6 +26,7 @@ type Telemetry = {
 
 type RunningTask = { process_id: number; name: string; window: string; memory_mb: number };
 type QuickNote = { id: string; title: string; body: string; created_at: string };
+type ScreenRecording = { id: string; created_at: string; file_name: string; duration_seconds?: number; local_path?: string; storage_path?: string; sent_to_phone?: boolean; send_error?: string };
 
 type Props = {
   deviceId: string;
@@ -42,9 +46,57 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
   const [noteBody, setNoteBody] = useState("");
   const [notes, setNotes] = useState<QuickNote[]>([]);
   const [notesLoading, setNotesLoading] = useState(false);
+  const [recordingName, setRecordingName] = useState("");
+  const [sendRecordingToPhone, setSendRecordingToPhone] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordingSince, setRecordingSince] = useState<number | null>(null);
+  const [recordingActionLoading, setRecordingActionLoading] = useState(false);
+  const [recordings, setRecordings] = useState<ScreenRecording[]>([]);
+  const [recordingsLoading, setRecordingsLoading] = useState(false);
+  const [renamingRecordingId, setRenamingRecordingId] = useState<string | null>(null);
+  const [renamingRecordingName, setRenamingRecordingName] = useState("");
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [appsExpanded, setAppsExpanded] = useState(false);
   const [notesExpanded, setNotesExpanded] = useState(false);
+
+  const loadRecordings = useCallback(async () => {
+    setRecordingsLoading(true);
+    const { data, error } = await supabase
+      .from("commands")
+      .select("id,action,status,created_at,result")
+      .eq("device_id", deviceId)
+      .eq("user_id", userId)
+      .in("action", ["screen_record", "rename_recording"])
+      .order("created_at", { ascending: false })
+      .limit(30);
+    if (!error) {
+      const rows = data ?? [];
+      const latestNames = new Map<string, string>();
+      for (const row of rows) {
+        const result = row.result as Record<string, unknown> | null;
+        if (row.action === "rename_recording" && row.status === "completed" && typeof result?.recording_id === "string" && typeof result.file_name === "string" && !latestNames.has(result.recording_id)) {
+          latestNames.set(result.recording_id, result.file_name);
+        }
+      }
+      const items = rows.flatMap((row) => {
+        if (row.action !== "screen_record") return [];
+        const result = row.result as Record<string, unknown> | null;
+        if (row.status !== "completed" || result?.saved_locally !== true) return [];
+        return [{
+          id: row.id,
+          created_at: row.created_at,
+          file_name: latestNames.get(row.id) || String(result.file_name || "Screen recording.mp4"),
+          duration_seconds: typeof result.duration_seconds === "number" ? result.duration_seconds : undefined,
+          local_path: typeof result.local_path === "string" ? result.local_path : undefined,
+          storage_path: typeof result.storage_path === "string" ? result.storage_path : undefined,
+          sent_to_phone: result.sent_to_phone === true,
+          send_error: typeof result.send_error === "string" ? result.send_error : undefined,
+        }];
+      });
+      setRecordings(items as ScreenRecording[]);
+    }
+    setRecordingsLoading(false);
+  }, [deviceId, userId]);
 
   const loadNotes = useCallback(async () => {
     setNotesLoading(true);
@@ -63,6 +115,11 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
     const timerId = setTimeout(() => { void loadNotes(); }, 0);
     return () => clearTimeout(timerId);
   }, [loadNotes]);
+
+  useEffect(() => {
+    const timerId = setTimeout(() => { void loadRecordings(); }, 0);
+    return () => clearTimeout(timerId);
+  }, [loadRecordings]);
 
   useEffect(() => {
     if (!localActiveCommand) return;
@@ -238,6 +295,128 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
     if (commandId) Alert.alert("Note queued", "The laptop will save and open this note when its agent is ready.");
   }
 
+  const waitForRecordingCommand = useCallback(async (commandId: string) => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const { data, error } = await supabase.from("commands").select("status,result,failure_reason").eq("id", commandId).eq("user_id", userId).maybeSingle();
+      if (error) throw error;
+      if (data?.status === "failed") throw new Error(data.failure_reason || "The laptop could not complete the recording action.");
+      if (data?.status === "completed") return data.result as Record<string, unknown> | null;
+    }
+    throw new Error("The laptop has not confirmed the recording action yet.");
+  }, [userId]);
+
+  async function startScreenRecording() {
+    const name = recordingName.trim() || "Screen recording";
+    setRecordingActionLoading(true);
+    try {
+      const commandId = await sendCommand("screen_record", { mode: "start", name, send_to_phone: sendRecordingToPhone, max_seconds: 60 });
+      if (!commandId) return;
+      const result = await waitForRecordingCommand(commandId);
+      setRecording(true);
+      setRecordingSince(typeof result?.started_at === "string" ? Date.parse(result.started_at) : Date.now());
+      setRecordingName(name);
+      Alert.alert("Recording started", "Xbox Game Bar is showing a visible recording indicator. The clip will stop automatically after one minute.");
+    } catch (error) {
+      Alert.alert("Could not start recording", error instanceof Error ? error.message : "Check that Xbox Game Bar recording is enabled.");
+    } finally {
+      setRecordingActionLoading(false);
+    }
+  }
+
+  async function refreshRecordingStatus() {
+    setRecordingActionLoading(true);
+    try {
+      const commandId = await sendCommand("screen_record", { mode: "status" });
+      if (!commandId) return;
+      const result = await waitForRecordingCommand(commandId);
+      const active = result?.recording === true;
+      setRecording(active);
+      setRecordingSince(active && typeof result?.started_at === "string" ? Date.parse(result.started_at) : null);
+      if (!active) await loadRecordings();
+    } catch (error) {
+      Alert.alert("Could not check recording", error instanceof Error ? error.message : "Try again when the laptop is online.");
+    } finally {
+      setRecordingActionLoading(false);
+    }
+  }
+
+  const stopScreenRecording = useCallback(async () => {
+    setRecordingActionLoading(true);
+    try {
+      const commandId = await sendCommand("screen_record", { mode: "stop" });
+      if (!commandId) return;
+      const result = await waitForRecordingCommand(commandId);
+      setRecording(false);
+      setRecordingSince(null);
+      await loadRecordings();
+      const saved = result?.saved_locally === true ? `Saved on laptop as ${String(result.file_name || "Screen recording.mp4")} in Videos/Laptop Lock Recordings.` : "The laptop stopped the recording.";
+      const delivery = result?.sent_to_phone === true
+        ? " A private copy is ready in this controller and can be opened or shared."
+        : typeof result?.send_error === "string"
+          ? ` The local copy is safe, but sending failed: ${result.send_error}`
+          : sendRecordingToPhone ? " The recording was saved locally; no phone copy was created." : "";
+      Alert.alert("Recording saved", saved + delivery);
+    } catch (error) {
+      Alert.alert("Could not stop recording", error instanceof Error ? error.message : "Try Stop again when the laptop is online.");
+    } finally {
+      setRecordingActionLoading(false);
+    }
+  }, [loadRecordings, sendCommand, sendRecordingToPhone, waitForRecordingCommand]);
+
+  useEffect(() => {
+    if (!recording || recordingSince == null) return;
+    const remainingMs = Math.max(0, 55_000 - (Date.now() - recordingSince));
+    const timerId = setTimeout(() => {
+      if (Date.now() - recordingSince >= 58_000) {
+        setRecording(false);
+        setRecordingSince(null);
+        void loadRecordings();
+      } else {
+        void stopScreenRecording();
+      }
+    }, remainingMs);
+    return () => clearTimeout(timerId);
+  }, [loadRecordings, recording, recordingSince, stopScreenRecording]);
+
+  async function getRecordingUrl(item: ScreenRecording, download = false) {
+    const { data, error } = await supabase.functions.invoke("recording-link", { body: { command_id: item.id, file_name: item.file_name, download } });
+    if (error || !data?.signed_url) throw new Error(data?.error || error?.message || "Could not open this private video.");
+    return String(data.signed_url);
+  }
+
+  async function openRecording(item: ScreenRecording) {
+    try { await Linking.openURL(await getRecordingUrl(item)); }
+    catch (error) { Alert.alert("Could not open recording", error instanceof Error ? error.message : "Try again."); }
+  }
+
+  async function downloadRecording(item: ScreenRecording) {
+    try { await Linking.openURL(await getRecordingUrl(item, true)); }
+    catch (error) { Alert.alert("Could not download recording", error instanceof Error ? error.message : "Try again."); }
+  }
+
+  async function shareRecording(item: ScreenRecording) {
+    try {
+      const url = await getRecordingUrl(item);
+      await Share.share({ title: item.file_name, message: `${item.file_name}\n${url}`, url });
+    } catch (error) { Alert.alert("Could not share recording", error instanceof Error ? error.message : "Try again."); }
+  }
+
+  async function renameRecording(item: ScreenRecording) {
+    const newName = renamingRecordingName.trim();
+    if (!newName) { Alert.alert("Add a name", "Enter a name for this clip."); return; }
+    const commandId = await sendCommand("rename_recording", { recording_id: item.id, file_name: item.file_name, new_name: newName });
+    if (!commandId) return;
+    try {
+      await waitForRecordingCommand(commandId);
+      setRenamingRecordingId(null);
+      setRenamingRecordingName("");
+      await loadRecordings();
+    } catch (error) {
+      Alert.alert("Could not rename clip", error instanceof Error ? error.message : "Try again when the laptop is online.");
+    }
+  }
+
   return (
     <View style={styles.wrap}>
       <View style={styles.card}>
@@ -288,6 +467,55 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           ))}
           {!taskLoading && tasks.length === 0 && <Text style={styles.muted}>Refresh to see open desktop apps.</Text>}
         </>}
+      </View>
+
+      <View style={styles.card}>
+        <View style={styles.heading}>
+          <Text style={styles.title}>Screen recording</Text>
+          <Text style={styles.subtitle}>Record a short clip with a visible Windows recording indicator</Text>
+        </View>
+        {recording && <View style={styles.recordingBadge}><View style={styles.recordingDot} /><Text style={styles.recordingBadgeText}>Recording on laptop · stops automatically at 60 seconds</Text></View>}
+        <TextInput style={styles.input} placeholder="Recording name" placeholderTextColor="#8090a5" value={recordingName} onChangeText={setRecordingName} maxLength={80} editable={!recording} />
+        <View style={styles.recordingOption}>
+          <View style={styles.recordingOptionCopy}><Text style={styles.infoLabel}>Send a copy to this phone</Text><Text style={styles.recordingOptionHint}>The original is always saved on the laptop.</Text></View>
+          <Switch value={sendRecordingToPhone} onValueChange={setSendRecordingToPhone} disabled={recording || recordingActionLoading} trackColor={{ false: "#334155", true: "#2563eb" }} thumbColor="#f8fafc" />
+        </View>
+        <TouchableOpacity
+          style={[styles.recordingButton, recording && styles.recordingStopButton, (!online || sending || commandBusy || !!localActiveCommand || recordingActionLoading) && styles.disabled]}
+          onPress={() => void (recording ? stopScreenRecording() : startScreenRecording())}
+          disabled={!online || sending || commandBusy || !!localActiveCommand || recordingActionLoading}
+          accessibilityRole="button"
+        >
+          {recordingActionLoading ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.recordingButtonText}>{recording ? "Stop & save recording" : "Start recording (max 60 sec)"}</Text>}
+        </TouchableOpacity>
+        <Text style={styles.footnote}>Keep the app you want to capture open. Clips are saved to Videos/Laptop Lock Recordings.</Text>
+        <TouchableOpacity style={styles.recordingStatusButton} onPress={() => void refreshRecordingStatus()} disabled={!online || sending || commandBusy || !!localActiveCommand || recordingActionLoading} accessibilityRole="button">
+          <Text style={styles.secondaryButtonText}>{recordingActionLoading ? "Checking..." : "Check Windows recording status"}</Text>
+        </TouchableOpacity>
+        <View style={styles.recordingListHeading}><Text style={styles.infoLabel}>Recent clips</Text><TouchableOpacity onPress={() => void loadRecordings()} disabled={recordingsLoading}><Text style={styles.sendText}>{recordingsLoading ? "Loading" : "Refresh"}</Text></TouchableOpacity></View>
+        {recordings.map((item) => (
+          <View key={item.id} style={styles.recordingRow}>
+            <View style={styles.recordingDetails}>
+              <Text style={styles.taskName} numberOfLines={1}>{item.file_name}</Text>
+              <Text style={styles.taskMeta}>{item.duration_seconds ? `${item.duration_seconds}s - ` : ""}{item.sent_to_phone ? "Private phone copy ready" : "Saved on laptop"}</Text>
+              {renamingRecordingId === item.id && <TextInput style={styles.renameInput} value={renamingRecordingName} onChangeText={setRenamingRecordingName} placeholder="New clip name" placeholderTextColor="#8090a5" maxLength={80} returnKeyType="done" onSubmitEditing={() => void renameRecording(item)} />}
+            </View>
+            <View style={styles.noteActions}>
+              {renamingRecordingId === item.id ? <>
+                <TouchableOpacity style={styles.recordingAction} onPress={() => void renameRecording(item)} disabled={!online || sending || commandBusy || !!localActiveCommand}><Text style={styles.sendText}>Save</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.recordingAction} onPress={() => setRenamingRecordingId(null)}><Text style={styles.deleteText}>Cancel</Text></TouchableOpacity>
+              </> : <>
+                {item.storage_path && <>
+                  <TouchableOpacity style={styles.recordingAction} onPress={() => void openRecording(item)} accessibilityLabel="Open recording"><Text style={styles.sendText}>Open</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.recordingAction} onPress={() => void downloadRecording(item)} accessibilityLabel="Download recording"><Text style={styles.sendText}>Save</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.recordingAction} onPress={() => void shareRecording(item)} accessibilityLabel="Send recording"><Text style={styles.sendText}>Send</Text></TouchableOpacity>
+                </>}
+                <TouchableOpacity style={styles.recordingAction} onPress={() => { setRenamingRecordingId(item.id); setRenamingRecordingName(item.file_name.replace(/\.mp4$/i, "")); }} disabled={!online} accessibilityLabel="Rename recording"><Text style={styles.sendText}>Rename</Text></TouchableOpacity>
+              </>}
+            </View>
+          </View>
+        ))}
+        {!recordingsLoading && recordings.length === 0 && <Text style={styles.muted}>Your saved clips will appear here. Turn on the phone-copy option before recording to open and share them from this list.</Text>}
       </View>
 
       <View style={styles.card}>
@@ -348,6 +576,21 @@ const styles = StyleSheet.create({
   primaryButtonText: { color: "#fff", fontWeight: "700", fontSize: 13 },
   panicButton: { flex: 1, minWidth: 0, minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,107,129,0.25)", backgroundColor: "rgba(255,77,104,0.10)", alignItems: "center", justifyContent: "center", paddingHorizontal: 10 },
   panicText: { color: "#ff9bab", fontSize: 13, fontWeight: "700" },
+  recordingOption: { width: "100%", minHeight: 52, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, borderRadius: 12, backgroundColor: "rgba(15,23,42,0.65)", paddingHorizontal: 12, paddingVertical: 8 },
+  recordingOptionCopy: { flex: 1, minWidth: 0, gap: 3 },
+  recordingOptionHint: { color: "#94a3b8", fontSize: 12, lineHeight: 16 },
+  recordingBadge: { width: "100%", minHeight: 38, flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 11, borderWidth: 1, borderColor: "rgba(248,113,113,0.35)", backgroundColor: "rgba(127,29,29,0.22)", paddingHorizontal: 12 },
+  recordingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: "#f87171" },
+  recordingBadgeText: { flex: 1, color: "#fecaca", fontSize: 12, fontWeight: "700" },
+  recordingButton: { width: "100%", minHeight: 48, borderRadius: 13, backgroundColor: "#dc2626", alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
+  recordingStopButton: { backgroundColor: "#991b1b" },
+  recordingButtonText: { color: "#fff", fontWeight: "700", fontSize: 14 },
+  recordingStatusButton: { width: "100%", minHeight: 40, borderRadius: 11, backgroundColor: "rgba(148,163,184,0.10)", alignItems: "center", justifyContent: "center", paddingHorizontal: 12 },
+  recordingListHeading: { minHeight: 30, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 4 },
+  recordingRow: { width: "100%", minWidth: 0, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.08)", paddingTop: 10 },
+  recordingDetails: { flex: 1, minWidth: 0, gap: 4 },
+  recordingAction: { minWidth: 56, minHeight: 40, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
+  renameInput: { width: "100%", minWidth: 0, minHeight: 40, marginTop: 4, backgroundColor: "#0b1220", borderColor: "#334155", borderWidth: 1, borderRadius: 10, color: "#f8fafc", paddingHorizontal: 10, fontSize: 13 },
   disabled: { opacity: 0.48 },
   muted: { color: "#94a3b8", fontSize: 13, lineHeight: 19 },
   infoRow: { minHeight: 26, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },

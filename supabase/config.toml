@@ -436,6 +436,16 @@ entrypoint = "./functions/agent-poll/index.ts"
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/agent-poll/*.html" ]
 
+[functions.recording-transfer]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/recording-transfer/index.ts"
+
+[functions.recording-link]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/recording-link/index.ts"
+
 [functions.register-laptop]
 enabled = true
 verify_jwt = true

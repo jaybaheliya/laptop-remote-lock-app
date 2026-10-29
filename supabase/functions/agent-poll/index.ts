@@ -207,7 +207,7 @@ Deno.serve(async (req: Request) => {
         .select("id, device_id, action, status, created_at, payload")
         .eq("device_id", deviceId)
         .eq("user_id", userId)
-        .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note"])
+        .in("action", ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording"])
         .eq("status", "pending")
         .order("created_at", { ascending: true })
         .limit(1)

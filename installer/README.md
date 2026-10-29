@@ -77,7 +77,9 @@ Run `update-agent.bat` from the repository root on the Windows workstation. It s
 5. Click **"📋 Copy Pairing Key"**.
 6. On the target Windows laptop, run `LaptopLockAgentSetup.exe`.
 7. Paste the Pairing Key into the setup wizard and complete the installation.
-8. The workstation is paired and reports online on the dashboard. The controller supports network, storage, and memory status; typed messages; panic screenshot-and-lock; visible-app task listing and end-task requests; and quick notes saved on the workstation.
+8. The workstation is paired and reports online on the dashboard. The controller supports network, storage, and memory status; typed messages; panic screenshot-and-lock; visible-app task listing and end-task requests; quick notes; and short screen recordings.
 
 Quick notes are created in Microsoft Sticky Notes using its supported keyboard shortcuts. A text backup is saved to the user's Documents folder. If Sticky Notes is missing or cannot be opened, the agent reports a delivery failure rather than claiming the note was added.
+
+Screen recording uses the installed Windows Xbox Game Bar (`Win` + `Alt` + `R`) and shows its recording indicator on the laptop. Keep the app to capture open. Clips stop at 60 seconds and are saved in `Videos\Laptop Lock Recordings`; the controller can rename the local clip. Enable **Send a copy to this phone** before recording to upload it to the private Supabase bucket, then open, download, or share it from the controller. The Windows agent and Supabase migrations/functions must both be updated for this feature.
 

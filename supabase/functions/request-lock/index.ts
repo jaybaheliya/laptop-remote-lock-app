@@ -73,7 +73,7 @@ Deno.serve(async (req: Request) => {
   const deviceId = body?.device_id;
   const requestedAction = typeof body?.action === "string" ? body.action.trim().toLowerCase() : "lock";
 
-  const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note"];
+  const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording"];
   if (!ALLOWED_ACTIONS.includes(requestedAction)) {
     return jsonResponse({ error: `Invalid action. Allowed: ${ALLOWED_ACTIONS.join(", ")}` }, 400);
   }
@@ -102,6 +102,15 @@ Deno.serve(async (req: Request) => {
   }
   if (requestedAction === "save_note" && (typeof payload.title !== "string" || !payload.title.trim() || payload.title.length > 100 || typeof payload.body !== "string" || !payload.body.trim() || payload.body.length > 5000)) {
     return jsonResponse({ error: "A note title and body are required" }, 400);
+  }
+  if (requestedAction === "screen_record" && !["start", "stop", "status"].includes(String(payload.mode))) {
+    return jsonResponse({ error: "Recording mode must be start, stop, or status" }, 400);
+  }
+  if (requestedAction === "screen_record" && payload.mode === "start" && (typeof payload.name !== "string" || !payload.name.trim() || payload.name.length > 80 || typeof payload.send_to_phone !== "boolean" || (payload.max_seconds != null && (!Number.isInteger(payload.max_seconds) || Number(payload.max_seconds) < 15 || Number(payload.max_seconds) > 60)))) {
+    return jsonResponse({ error: "Recording needs a name, send choice, and a 15 to 60 second limit" }, 400);
+  }
+  if (requestedAction === "rename_recording" && (typeof payload.recording_id !== "string" || !uuidPattern.test(payload.recording_id) || typeof payload.file_name !== "string" || !payload.file_name.toLowerCase().endsWith(".mp4") || typeof payload.new_name !== "string" || !payload.new_name.trim() || payload.new_name.length > 80)) {
+    return jsonResponse({ error: "A saved recording and a new name are required" }, 400);
   }
 
   // Verify that this device belongs to the signed-in user.
