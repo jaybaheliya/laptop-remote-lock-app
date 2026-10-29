@@ -3,6 +3,9 @@ const path = require("node:path");
 const os = require("node:os");
 const net = require("node:net");
 const { spawn } = require("node:child_process");
+const crypto = require("node:crypto");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 
 if (process.platform !== "win32") {
   console.error("This agent is intended for Windows.");
@@ -636,82 +639,123 @@ function unlockOrWakeWindows() {
 const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording"];
 
 let screenRecordingSession = null;
+let ffmpegDownloadPromise = null;
 
-function toggleWindowsScreenRecording() {
-  const script = `Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-using System.Threading;
-public static class GameBarRecordingHotkey {
-  [DllImport("user32.dll")] private static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
-  public static void Toggle() {
-    keybd_event(0x5B, 0, 0, UIntPtr.Zero); Thread.Sleep(80);
-    keybd_event(0x12, 0, 0, UIntPtr.Zero); Thread.Sleep(80);
-    keybd_event(0x52, 0, 0, UIntPtr.Zero); Thread.Sleep(120);
-    keybd_event(0x52, 0, 2, UIntPtr.Zero);
-    keybd_event(0x12, 0, 2, UIntPtr.Zero);
-    keybd_event(0x5B, 0, 2, UIntPtr.Zero);
+const FFMPEG_ARCHIVE_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-25-13-00/ffmpeg-n9.0.2-36-g6882969ce9-win64-lgpl-shared-9.0.zip";
+const FFMPEG_ARCHIVE_SHA256 = "72e3fbaf17f8d5162c3010f9e58872fcb93ba2b03731fd0fff1ca9aabb616ea6";
+
+async function ensureFfmpeg() {
+  const toolsDir = path.join(config.configDir, "tools", "ffmpeg");
+  const executable = path.join(toolsDir, "ffmpeg.exe");
+  if (fs.existsSync(executable)) {
+    try {
+      await runProcess(executable, ["-version"], 10000);
+      return executable;
+    } catch {
+      fs.rmSync(executable, { force: true });
+    }
   }
-}
-"@ -ErrorAction Stop; [GameBarRecordingHotkey]::Toggle()`;
-  return runPowerShell(script, 10000);
+  if (ffmpegDownloadPromise) return ffmpegDownloadPromise;
+
+  ffmpegDownloadPromise = (async () => {
+    const response = await fetch(FFMPEG_ARCHIVE_URL, { signal: AbortSignal.timeout(180000) });
+    if (!response.ok || !response.body) throw new Error(`Could not download the screen recording engine (${response.status}).`);
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "laptop-lock-ffmpeg-"));
+    const archive = path.join(tempDir, "ffmpeg.zip");
+    const extractDir = path.join(tempDir, "expanded");
+    try {
+      await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(archive));
+      const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
+      if (digest !== FFMPEG_ARCHIVE_SHA256) throw new Error("The screen recording engine download failed its integrity check.");
+      fs.mkdirSync(extractDir, { recursive: true });
+      const escapedArchive = archive.replace(/'/g, "''");
+      const escapedExtract = extractDir.replace(/'/g, "''");
+      await runPowerShell(`Expand-Archive -LiteralPath '${escapedArchive}' -DestinationPath '${escapedExtract}' -Force`, 180000);
+      const buildFolder = fs.readdirSync(extractDir).find((name) => name.startsWith("ffmpeg-") && fs.existsSync(path.join(extractDir, name, "bin", "ffmpeg.exe")));
+      const found = buildFolder ? path.join(extractDir, buildFolder, "bin") : "";
+      if (!fs.existsSync(path.join(found, "ffmpeg.exe"))) throw new Error("The downloaded screen recording engine is incomplete.");
+      fs.mkdirSync(toolsDir, { recursive: true });
+      for (const name of fs.readdirSync(found).filter((entry) => entry.toLowerCase() === "ffmpeg.exe" || entry.toLowerCase().endsWith(".dll"))) {
+        fs.copyFileSync(path.join(found, name), path.join(toolsDir, name));
+      }
+      const license = fs.readdirSync(extractDir).find((name) => /^(LICENSE|COPYING)/i.test(name));
+      if (license) fs.copyFileSync(path.join(extractDir, license), path.join(toolsDir, license));
+      const probe = await runProcess(executable, ["-hide_banner", "-encoders"], 15000);
+      if (!`${probe.stdout}\n${probe.stderr}`.includes("h264_mf")) throw new Error("This Windows installation does not provide the H.264 video encoder required for screen recording.");
+      return executable;
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  })();
+  try { return await ffmpegDownloadPromise; }
+  finally { ffmpegDownloadPromise = null; }
 }
 
-function getGameBarCaptureFolder() {
-  return path.join(os.homedir(), "Videos", "Captures");
+function runProcess(executable, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => { child.kill(); reject(new Error("The screen recording engine timed out.")); }, timeoutMs);
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(stderr.trim().slice(-1500) || `Screen recording engine exited with code ${code}.`));
+    });
+  });
 }
 
 async function startScreenRecording(payload = {}, commandId) {
   if (screenRecordingSession) throw new Error("A screen recording is already active. Stop it before starting another.");
-  const packageState = await runPowerShell("$p=Get-AppxPackage Microsoft.XboxGamingOverlay; if(-not $p){throw 'Xbox Game Bar is not installed for this Windows user'}; $p.Version.ToString()");
-  if (!packageState) throw new Error("Xbox Game Bar is unavailable");
+  const ffmpeg = await ensureFfmpeg();
   const title = String(payload.name || "Screen recording").trim().slice(0, 80) || "Screen recording";
   const maxSeconds = Math.max(15, Math.min(60, Number(payload.max_seconds) || 60));
   const startedAt = Date.now();
-  await toggleWindowsScreenRecording();
-  screenRecordingSession = {
+  const tempPath = path.join(os.tmpdir(), `laptop-lock-recording-${process.pid}-${crypto.randomUUID()}.mp4`);
+  const child = spawn(ffmpeg, [
+    "-hide_banner", "-loglevel", "warning", "-y", "-f", "gdigrab", "-draw_mouse", "1", "-framerate", "15", "-i", "desktop",
+    "-an", "-c:v", "h264_mf", "-b:v", "2500k", "-pix_fmt", "yuv420p", "-movflags", "+faststart", tempPath,
+  ], { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+  const session = {
+    child,
+    tempPath,
     title,
     startCommandId: commandId,
     startedAt,
     maxSeconds,
     sendToPhone: payload.send_to_phone === true,
+    stderr: "",
+    closePromise: null,
+    stopPromise: null,
     autoStopTimer: null,
+  };
+  child.stderr.on("data", (chunk) => { session.stderr = (session.stderr + chunk.toString()).slice(-6000); });
+  session.closePromise = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+  child.once("error", () => {});
+  screenRecordingSession = {
+    ...session,
   };
   screenRecordingSession.autoStopTimer = setTimeout(() => {
     stopScreenRecording(null, true).catch((error) => console.error("Automatic screen recording stop failed:", error.message));
   }, maxSeconds * 1000);
-  return { recording: true, started_at: new Date(startedAt).toISOString(), max_seconds: maxSeconds, visible_indicator: "Xbox Game Bar" };
+  const earlyExit = await Promise.race([
+    session.closePromise.then((exit) => ({ exit })),
+    new Promise((resolve) => setTimeout(() => resolve(null), 1000)),
+  ]);
+  if (earlyExit) {
+    clearTimeout(session.autoStopTimer);
+    screenRecordingSession = null;
+    fs.rmSync(tempPath, { force: true });
+    throw new Error(`Could not start desktop capture: ${session.stderr.trim().slice(-1200) || "FFmpeg exited before recording began."}`);
+  }
+  return { recording: true, started_at: new Date(startedAt).toISOString(), max_seconds: maxSeconds, visible_indicator: "Controller recording status" };
 }
 
 function safeRecordingTitle(value) {
   return String(value || "Screen recording").trim().slice(0, 80).replace(/[<>:"/\\|?*\x00-\x1F]/g, "_") || "Screen recording";
-}
-
-async function waitForCompletedGameBarCapture(startedAt) {
-  const folder = getGameBarCaptureFolder();
-  const deadline = Date.now() + 20000;
-  let stablePath = null;
-  let stableSize = -1;
-  let stableChecks = 0;
-  while (Date.now() < deadline) {
-    let candidates = [];
-    try {
-      candidates = fs.readdirSync(folder)
-        .filter((name) => name.toLowerCase().endsWith(".mp4"))
-        .map((name) => path.join(folder, name))
-        .map((file) => ({ file, stat: fs.statSync(file) }))
-        .filter(({ stat }) => stat.mtimeMs >= startedAt - 5000 && stat.size > 0)
-        .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
-    } catch {
-      // Game Bar may create this folder only when the first capture is saved.
-    }
-    const newest = candidates[0];
-    if (newest && newest.file === stablePath && newest.stat.size === stableSize) stableChecks++;
-    else { stablePath = newest?.file || null; stableSize = newest?.stat.size || -1; stableChecks = newest ? 1 : 0; }
-    if (newest && stableChecks >= 3) return newest.file;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  throw new Error("Xbox Game Bar did not finish a video file. Check that recording is enabled in Windows and that an app is open to capture.");
 }
 
 async function uploadScreenRecording(filePath, commandId, startCommandId) {
@@ -738,26 +782,50 @@ async function uploadScreenRecording(filePath, commandId, startCommandId) {
 async function stopScreenRecording(commandId = null, automatic = false) {
   const session = screenRecordingSession;
   if (!session) throw new Error("There is no active screen recording to stop.");
-  clearTimeout(session.autoStopTimer);
-  screenRecordingSession = null;
-  await toggleWindowsScreenRecording();
-  const capturePath = await waitForCompletedGameBarCapture(session.startedAt);
-  const outputFolder = path.join(os.homedir(), "Videos", "Laptop Lock Recordings");
-  fs.mkdirSync(outputFolder, { recursive: true });
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const fileName = `${timestamp}_${safeRecordingTitle(session.title)}.mp4`;
-  const localPath = path.join(outputFolder, fileName);
-  fs.renameSync(capturePath, localPath);
-  const result = { recording: false, saved_locally: true, local_path: localPath, file_name: fileName, duration_seconds: Math.max(1, Math.round((Date.now() - session.startedAt) / 1000)), automatically_stopped: automatic, sent_to_phone: false };
-  if (session.sendToPhone && commandId) {
-    try {
-      result.storage_path = await uploadScreenRecording(localPath, commandId, session.startCommandId);
-      result.sent_to_phone = true;
-    } catch (error) {
-      result.send_error = error instanceof Error ? error.message : "Upload failed";
+  if (session.stopPromise) return session.stopPromise;
+  session.stopPromise = (async () => {
+    clearTimeout(session.autoStopTimer);
+    if (session.child.exitCode == null && !session.child.killed) {
+      try { session.child.stdin.write("q\n"); session.child.stdin.end(); } catch {}
     }
+    const exit = await Promise.race([
+      session.closePromise,
+      new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
+    ]);
+    if (!exit) {
+      session.child.kill();
+      await session.closePromise;
+      screenRecordingSession = null;
+      fs.rmSync(session.tempPath, { force: true });
+      throw new Error("Desktop capture did not stop cleanly. The incomplete clip was discarded; you can start a fresh recording.");
+    }
+    screenRecordingSession = null;
+    if (exit.code !== 0 || !fs.existsSync(session.tempPath) || fs.statSync(session.tempPath).size < 1024) {
+      fs.rmSync(session.tempPath, { force: true });
+      throw new Error(`The screen recording was not finalized: ${session.stderr.trim().slice(-1200) || "No playable video was produced."}`);
+    }
+    const outputFolder = path.join(os.homedir(), "Videos", "Laptop Lock Recordings");
+    fs.mkdirSync(outputFolder, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `${timestamp}_${safeRecordingTitle(session.title)}.mp4`;
+    const localPath = path.join(outputFolder, fileName);
+    fs.renameSync(session.tempPath, localPath);
+    const result = { recording: false, saved_locally: true, local_path: localPath, file_name: fileName, duration_seconds: Math.max(1, Math.round((Date.now() - session.startedAt) / 1000)), automatically_stopped: automatic, sent_to_phone: false };
+    if (session.sendToPhone && commandId) {
+      try {
+        result.storage_path = await uploadScreenRecording(localPath, commandId, session.startCommandId);
+        result.sent_to_phone = true;
+      } catch (error) {
+        result.send_error = error instanceof Error ? error.message : "Upload failed";
+      }
+    }
+    return result;
+  })();
+  try { return await session.stopPromise; }
+  catch (error) {
+    if (screenRecordingSession === session && session.child.exitCode != null) screenRecordingSession = null;
+    throw error;
   }
-  return result;
 }
 
 function renameSavedRecording(fileName, newName, recordingId) {

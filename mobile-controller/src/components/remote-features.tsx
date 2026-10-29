@@ -316,9 +316,9 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
       setRecording(true);
       setRecordingSince(typeof result?.started_at === "string" ? Date.parse(result.started_at) : Date.now());
       setRecordingName(name);
-      Alert.alert("Recording started", "Xbox Game Bar is showing a visible recording indicator. The clip will stop automatically after one minute.");
+      Alert.alert("Recording started", "The laptop desktop is being captured. Stop it here, or it will save automatically after one minute.");
     } catch (error) {
-      Alert.alert("Could not start recording", error instanceof Error ? error.message : "Check that Xbox Game Bar recording is enabled.");
+      Alert.alert("Could not start recording", error instanceof Error ? error.message : "Check that the laptop is online and try again.");
     } finally {
       setRecordingActionLoading(false);
     }
@@ -472,7 +472,7 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
       <View style={styles.card}>
         <View style={styles.heading}>
           <Text style={styles.title}>Screen recording</Text>
-          <Text style={styles.subtitle}>Record a short clip with a visible Windows recording indicator</Text>
+          <Text style={styles.subtitle}>Capture the laptop desktop for up to one minute</Text>
         </View>
         {recording && <View style={styles.recordingBadge}><View style={styles.recordingDot} /><Text style={styles.recordingBadgeText}>Recording on laptop · stops automatically at 60 seconds</Text></View>}
         <TextInput style={styles.input} placeholder="Recording name" placeholderTextColor="#8090a5" value={recordingName} onChangeText={setRecordingName} maxLength={80} editable={!recording} />
