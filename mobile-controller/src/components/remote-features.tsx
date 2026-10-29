@@ -42,6 +42,9 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
   const [noteBody, setNoteBody] = useState("");
   const [notes, setNotes] = useState<QuickNote[]>([]);
   const [notesLoading, setNotesLoading] = useState(false);
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
+  const [appsExpanded, setAppsExpanded] = useState(false);
+  const [notesExpanded, setNotesExpanded] = useState(false);
 
   const loadNotes = useCallback(async () => {
     setNotesLoading(true);
@@ -238,59 +241,78 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
   return (
     <View style={styles.wrap}>
       <View style={styles.card}>
-        <View style={styles.heading}><Text style={styles.title}>Quick actions</Text><Text style={styles.subtitle}>Send a message or secure the laptop fast</Text></View>
-        <TextInput style={styles.input} placeholder="Type a message to show on Windows…" placeholderTextColor="#8090a5" value={message} onChangeText={setMessage} maxLength={500} multiline />
-        <TouchableOpacity style={[styles.primaryButton, (!online || sending || commandBusy || !!localActiveCommand || !message.trim()) && styles.disabled]} onPress={() => void sendMessage()} disabled={!online || sending || commandBusy || !!localActiveCommand || !message.trim()}>
-          <Text style={styles.primaryButtonText}>{sending ? "Sending…" : "Send message to laptop"}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.panicButton, (!online || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={confirmPanic} disabled={!online || sending || commandBusy || !!localActiveCommand}>
-          <Text style={styles.panicText}>⚠  PANIC: CAPTURE & LOCK</Text>
-        </TouchableOpacity>
+        <View style={styles.heading}><Text style={styles.title}>Quick actions</Text><Text style={styles.subtitle}>Send a message or secure the laptop</Text></View>
+        <TextInput style={styles.input} placeholder="Type a message for Windows..." placeholderTextColor="#8090a5" value={message} onChangeText={setMessage} maxLength={500} multiline />
+        <View style={styles.actionRow}>
+          <TouchableOpacity style={[styles.actionButton, (!online || sending || commandBusy || !!localActiveCommand || !message.trim()) && styles.disabled]} onPress={() => void sendMessage()} disabled={!online || sending || commandBusy || !!localActiveCommand || !message.trim()}>
+            <Text style={styles.primaryButtonText}>{sending ? "Sending..." : "Send message"}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.panicButton, (!online || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={confirmPanic} disabled={!online || sending || commandBusy || !!localActiveCommand}>
+            <Text style={styles.panicText}>Panic lock</Text>
+          </TouchableOpacity>
+        </View>
         {!online && <Text style={styles.muted}>Laptop is offline. Quick actions are disabled until its agent reconnects.</Text>}
       </View>
 
       <View style={styles.card}>
-        <View style={styles.heading}><Text style={styles.title}>Laptop details</Text><Text style={styles.subtitle}>Latest report from the Windows agent</Text></View>
-        <View style={styles.infoRow}><Text style={styles.infoLabel}>Network</Text><Text style={styles.infoValue} numberOfLines={1}>{telemetry.network_name || "Unknown"}</Text></View>
-        <View style={styles.infoRow}><Text style={styles.infoLabel}>Connection</Text><Text style={styles.infoValue}>{telemetry.network_type || "—"}</Text></View>
-        <View style={styles.infoRow}><Text style={styles.infoLabel}>Local IP</Text><Text style={styles.infoValue}>{telemetry.local_ip || "—"}</Text></View>
-        <Metric label="Storage free" used={telemetry.disk_total_gb != null && telemetry.disk_free_gb != null ? telemetry.disk_total_gb - telemetry.disk_free_gb : null} total={telemetry.disk_total_gb} unit="GB" />
-        <Metric label="Memory used" used={telemetry.memory_used_gb} total={telemetry.memory_total_gb} unit="GB" />
-        <Text style={styles.footnote}>Status refreshes when the agent checks in.</Text>
-      </View>
-
-      <View style={styles.card}>
-        <View style={styles.heading}><Text style={styles.title}>Running apps</Text><Text style={styles.subtitle}>View open apps and close one if needed</Text></View>
-        <TouchableOpacity style={[styles.secondaryButton, (!online || taskLoading || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={() => void refreshTasks()} disabled={!online || taskLoading || sending || commandBusy || !!localActiveCommand}>
-          {taskLoading ? <ActivityIndicator color="#bfdbfe" /> : <Text style={styles.secondaryButtonText}>↻  Refresh running apps</Text>}
-        </TouchableOpacity>
-        {tasks.map((task) => (
-          <View key={task.process_id} style={styles.taskRow}>
-            <View style={styles.taskDetails}><Text style={styles.taskName} numberOfLines={1}>{task.name}</Text><Text style={styles.taskMeta} numberOfLines={1}>{task.window || `PID ${task.process_id}`} · {task.memory_mb} MB</Text></View>
-            <TouchableOpacity style={styles.endButton} onPress={() => confirmEndTask(task)} disabled={!online || sending || commandBusy || !!localActiveCommand}><Text style={styles.endButtonText}>End</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.sectionHeader} onPress={() => setDetailsExpanded((value) => !value)} accessibilityRole="button" accessibilityState={{ expanded: detailsExpanded }}>
+          <View>
+            <Text style={styles.title}>System status</Text>
+            <Text style={styles.subtitle}>{detailsExpanded ? "Latest report from the Windows agent" : telemetry.network_name || "Tap to view network and storage"}</Text>
           </View>
-        ))}
-        {!taskLoading && tasks.length === 0 && <Text style={styles.muted}>Refresh to see open desktop apps.</Text>}
+          <Text style={styles.chevron}>{detailsExpanded ? "?" : "+"}</Text>
+        </TouchableOpacity>
+        {detailsExpanded && <>
+          <View style={styles.infoRow}><Text style={styles.infoLabel}>Connection</Text><Text style={styles.infoValue}>{telemetry.network_type || "\u2014"}</Text></View>
+          <View style={styles.infoRow}><Text style={styles.infoLabel}>Local IP</Text><Text style={styles.infoValue}>{telemetry.local_ip || "\u2014"}</Text></View>
+          <Metric label="Storage free" used={telemetry.disk_total_gb != null && telemetry.disk_free_gb != null ? telemetry.disk_total_gb - telemetry.disk_free_gb : null} total={telemetry.disk_total_gb} unit="GB" />
+          <Metric label="Memory used" used={telemetry.memory_used_gb} total={telemetry.memory_total_gb} unit="GB" />
+          <Text style={styles.footnote}>Updates when the laptop checks in.</Text>
+        </>}
       </View>
 
       <View style={styles.card}>
-        <View style={styles.heading}><Text style={styles.title}>Quick notes</Text><Text style={styles.subtitle}>Write on mobile, then open on this laptop as a sticky note or in Notepad</Text></View>
-        <TextInput style={styles.input} placeholder="Title (optional)" placeholderTextColor="#8090a5" value={noteTitle} onChangeText={setNoteTitle} maxLength={100} />
-        <TextInput style={[styles.input, styles.noteBody]} placeholder="Your note…" placeholderTextColor="#8090a5" value={noteBody} onChangeText={setNoteBody} maxLength={5000} multiline textAlignVertical="top" />
-        <TouchableOpacity style={[styles.primaryButton, (notesLoading || !noteBody.trim()) && styles.disabled]} onPress={() => void saveNote()} disabled={notesLoading || !noteBody.trim()}>
-          <Text style={styles.primaryButtonText}>{notesLoading ? "Saving…" : "Save & send to laptop"}</Text>
+        <TouchableOpacity style={styles.sectionHeader} onPress={() => setAppsExpanded((value) => !value)} accessibilityRole="button" accessibilityState={{ expanded: appsExpanded }}>
+          <View><Text style={styles.title}>Running apps</Text><Text style={styles.subtitle}>{appsExpanded ? "Close a visible app" : "See what is open on your laptop"}</Text></View>
+          <Text style={styles.chevron}>{appsExpanded ? "?" : "+"}</Text>
         </TouchableOpacity>
-        {notesLoading && notes.length === 0 && <ActivityIndicator color="#60a5fa" style={styles.loader} />}
-        {notes.map((note) => (
-          <View key={note.id} style={styles.noteRow}>
-            <View style={styles.noteContent}><Text style={styles.noteName} numberOfLines={1}>{note.title}</Text><Text style={styles.notePreview} numberOfLines={2}>{note.body}</Text></View>
-            <View style={styles.noteActions}>
-              <TouchableOpacity onPress={() => void sendSavedNote(note)} disabled={!online || sending || commandBusy || !!localActiveCommand} accessibilityLabel={`Send note ${note.title} to laptop`}><Text style={[styles.sendText, (!online || sending || commandBusy || !!localActiveCommand) && styles.actionDisabled]}>Send</Text></TouchableOpacity>
-              <TouchableOpacity onPress={() => void deleteNote(note.id)} accessibilityLabel={`Delete note ${note.title}`}><Text style={styles.deleteText}>Delete</Text></TouchableOpacity>
+        {appsExpanded && <>
+          <TouchableOpacity style={[styles.secondaryButton, (!online || taskLoading || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={() => void refreshTasks()} disabled={!online || taskLoading || sending || commandBusy || !!localActiveCommand}>
+            {taskLoading ? <ActivityIndicator color="#bfdbfe" size="small" /> : <Text style={styles.secondaryButtonText}>Refresh app list</Text>}
+          </TouchableOpacity>
+          {tasks.map((task) => (
+            <View key={task.process_id} style={styles.taskRow}>
+              <View style={styles.taskDetails}><Text style={styles.taskName} numberOfLines={1}>{task.name}</Text><Text style={styles.taskMeta} numberOfLines={1}>{task.window || "PID " + task.process_id} | {task.memory_mb} MB</Text></View>
+              <TouchableOpacity style={styles.endButton} onPress={() => confirmEndTask(task)} disabled={!online || sending || commandBusy || !!localActiveCommand}><Text style={styles.endButtonText}>End</Text></TouchableOpacity>
             </View>
-          </View>
-        ))}
-        {!notesLoading && notes.length === 0 && <Text style={styles.muted}>Notes you save here are private to your account.</Text>}
+          ))}
+          {!taskLoading && tasks.length === 0 && <Text style={styles.muted}>Refresh to see open desktop apps.</Text>}
+        </>}
+      </View>
+
+      <View style={styles.card}>
+        <TouchableOpacity style={styles.sectionHeader} onPress={() => setNotesExpanded((value) => !value)} accessibilityRole="button" accessibilityState={{ expanded: notesExpanded }}>
+          <View><Text style={styles.title}>Quick notes</Text><Text style={styles.subtitle}>{notes.length ? notes.length + (notes.length === 1 ? " saved note" : " saved notes") : "Write a note for your laptop"}</Text></View>
+          <Text style={styles.chevron}>{notesExpanded ? "?" : "+"}</Text>
+        </TouchableOpacity>
+        {notesExpanded && <>
+          <TextInput style={styles.input} placeholder="Title (optional)" placeholderTextColor="#8090a5" value={noteTitle} onChangeText={setNoteTitle} maxLength={100} />
+          <TextInput style={[styles.input, styles.noteBody]} placeholder="Write your note..." placeholderTextColor="#8090a5" value={noteBody} onChangeText={setNoteBody} maxLength={5000} multiline textAlignVertical="top" />
+          <TouchableOpacity style={[styles.primaryButton, (notesLoading || !noteBody.trim()) && styles.disabled]} onPress={() => void saveNote()} disabled={notesLoading || !noteBody.trim()}>
+            <Text style={styles.primaryButtonText}>{notesLoading ? "Saving..." : "Save & send"}</Text>
+          </TouchableOpacity>
+          {notesLoading && notes.length === 0 && <ActivityIndicator color="#60a5fa" style={styles.loader} />}
+          {notes.map((note) => (
+            <View key={note.id} style={styles.noteRow}>
+              <View style={styles.noteContent}><Text style={styles.noteName} numberOfLines={1}>{note.title}</Text><Text style={styles.notePreview} numberOfLines={2}>{note.body}</Text></View>
+              <View style={styles.noteActions}>
+                <TouchableOpacity onPress={() => void sendSavedNote(note)} disabled={!online || sending || commandBusy || !!localActiveCommand} accessibilityLabel="Send note to laptop"><Text style={[styles.sendText, (!online || sending || commandBusy || !!localActiveCommand) && styles.actionDisabled]}>Send</Text></TouchableOpacity>
+                <TouchableOpacity onPress={() => void deleteNote(note.id)} accessibilityLabel="Delete note"><Text style={styles.deleteText}>Delete</Text></TouchableOpacity>
+              </View>
+            </View>
+          ))}
+          {!notesLoading && notes.length === 0 && <Text style={styles.muted}>Notes you save here are private to your account.</Text>}
+        </>}
       </View>
     </View>
   );
@@ -310,17 +332,21 @@ function Metric({ label, used, total, unit }: { label: string; used: number | nu
 const styles = StyleSheet.create({
   // The dashboard parent centers its children; explicitly stretch this group so
   // the cards don't size themselves to their widest text on narrow screens.
-  wrap: { width: "100%", alignSelf: "stretch", minWidth: 0, gap: 14, marginTop: 14 },
-  card: { width: "100%", minWidth: 0, backgroundColor: "#111b2b", borderColor: "#26364d", borderWidth: 1, borderRadius: 20, padding: 18, gap: 12 },
+  wrap: { width: "100%", alignSelf: "stretch", minWidth: 0, marginTop: 14 },
+  card: { width: "100%", minWidth: 0, paddingVertical: 13, gap: 10, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.08)" },
+  sectionHeader: { width: "100%", minHeight: 46, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  chevron: { color: "#94a3b8", fontSize: 22, fontWeight: "300", width: 28, textAlign: "center" },
   heading: { gap: 4, marginBottom: 2 },
-  title: { color: "#f1f5f9", fontSize: 18, fontWeight: "800" },
+  title: { color: "#f1f5f9", fontSize: 16, fontWeight: "700" },
   subtitle: { color: "#94a3b8", fontSize: 13, lineHeight: 18 },
+  actionRow: { flexDirection: "row", gap: 9 },
+  actionButton: { flex: 1, minWidth: 0, minHeight: 44, borderRadius: 12, backgroundColor: "#2563eb", alignItems: "center", justifyContent: "center", paddingHorizontal: 10 },
   input: { width: "100%", minWidth: 0, minHeight: 48, backgroundColor: "#0b1220", borderColor: "#334155", borderWidth: 1, borderRadius: 12, color: "#f8fafc", paddingHorizontal: 14, paddingVertical: 12, fontSize: 15 },
   noteBody: { minHeight: 100 },
-  primaryButton: { width: "100%", minWidth: 0, minHeight: 48, borderRadius: 12, backgroundColor: "#2563eb", alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
-  primaryButtonText: { color: "#fff", fontWeight: "800", fontSize: 14 },
-  panicButton: { width: "100%", minWidth: 0, minHeight: 50, borderRadius: 12, borderWidth: 1, borderColor: "#be123c", backgroundColor: "#4c1120", alignItems: "center", justifyContent: "center", paddingHorizontal: 12 },
-  panicText: { color: "#fecdd3", fontSize: 14, fontWeight: "900", letterSpacing: 0.35 },
+  primaryButton: { width: "100%", minWidth: 0, minHeight: 46, borderRadius: 12, backgroundColor: "#2563eb", alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
+  primaryButtonText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+  panicButton: { flex: 1, minWidth: 0, minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,107,129,0.25)", backgroundColor: "rgba(255,77,104,0.10)", alignItems: "center", justifyContent: "center", paddingHorizontal: 10 },
+  panicText: { color: "#ff9bab", fontSize: 13, fontWeight: "700" },
   disabled: { opacity: 0.48 },
   muted: { color: "#94a3b8", fontSize: 13, lineHeight: 19 },
   infoRow: { minHeight: 26, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
@@ -332,8 +358,8 @@ const styles = StyleSheet.create({
   track: { height: 7, borderRadius: 6, overflow: "hidden", backgroundColor: "#28364b" },
   fill: { height: "100%", borderRadius: 6 },
   footnote: { color: "#718198", fontSize: 11, marginTop: 1 },
-  secondaryButton: { width: "100%", minWidth: 0, minHeight: 44, borderRadius: 11, backgroundColor: "#1d3557", alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
-  secondaryButtonText: { color: "#dbeafe", fontSize: 14, fontWeight: "800" },
+  secondaryButton: { alignSelf: "flex-start", minHeight: 40, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.08)", alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
+  secondaryButtonText: { color: "#dbeafe", fontSize: 13, fontWeight: "700" },
   taskRow: { minHeight: 58, flexDirection: "row", alignItems: "center", gap: 10, borderTopColor: "#25344a", borderTopWidth: 1, paddingTop: 8 },
   taskDetails: { flex: 1, minWidth: 0, gap: 3 },
   taskName: { color: "#e2e8f0", fontSize: 14, fontWeight: "800" },
