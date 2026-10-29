@@ -5,7 +5,7 @@
 ; =====================================================================
 
 #define MyAppName "Laptop Remote Lock Agent"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.3.1"
 #define MyAppPublisher "Security Defense Console"
 #define MyAppExeName "start-agent-hidden.vbs"
 
