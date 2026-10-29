@@ -214,9 +214,9 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
         if (command?.status === "completed") {
           setLocalActiveCommand(null);
           const result = command.result as { display_method?: string } | null;
-          const location = result?.display_method === "text_editor_fallback"
-            ? "It opened in Notepad because the sticky-note window could not start."
-            : "It opened in a sticky-note window.";
+          const location = result?.display_method === "microsoft_sticky_notes"
+            ? "It was added to Microsoft Sticky Notes."
+            : "The laptop reported that the note was delivered.";
           Alert.alert("Note delivered", `${location} A copy is saved in Documents/Laptop Lock Notes.`);
           return;
         }
@@ -296,6 +296,7 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           <Text style={styles.chevron}>{notesExpanded ? "-" : "+"}</Text>
         </TouchableOpacity>
         {notesExpanded && <>
+          <Text style={styles.muted}>Notes are added to Microsoft Sticky Notes. A backup is saved in Documents.</Text>
           <TextInput style={styles.input} placeholder="Title (optional)" placeholderTextColor="#8090a5" value={noteTitle} onChangeText={setNoteTitle} maxLength={100} />
           <TextInput style={[styles.input, styles.noteBody]} placeholder="Write your note..." placeholderTextColor="#8090a5" value={noteBody} onChangeText={setNoteBody} maxLength={5000} multiline textAlignVertical="top" />
           <TouchableOpacity style={[styles.primaryButton, (notesLoading || !noteBody.trim()) && styles.disabled]} onPress={() => void saveNote()} disabled={notesLoading || !noteBody.trim()}>

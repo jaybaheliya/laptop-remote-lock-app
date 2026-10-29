@@ -337,10 +337,13 @@ function getSystemTelemetry() {
   });
 }
 
-function runPowerShell(script, timeoutMs = 15000) {
+function runPowerShell(script, timeoutMs = 15000, useSta = false) {
   return new Promise((resolve, reject) => {
     const encoded = Buffer.from(script, "utf16le").toString("base64");
-    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], { shell: false, windowsHide: true });
+    const args = ["-NoProfile", "-NonInteractive"];
+    if (useSta) args.push("-STA");
+    args.push("-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded);
+    const child = spawn("powershell.exe", args, { shell: false, windowsHide: true });
     let stdout = "";
     let stderr = "";
     const timerId = setTimeout(() => { child.kill(); reject(new Error("Windows command timed out")); }, timeoutMs);
@@ -393,43 +396,10 @@ async function saveLaptopNote(title, body) {
   const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}_${safeTitle.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")}.txt`;
   const notePath = path.join(folder, fileName);
   fs.writeFileSync(notePath, `${safeTitle}\r\n\r\n${safeBody}`, "utf8");
-  const psValue = (value) => Buffer.from(value, "utf8").toString("base64");
-  const readyFile = path.join(os.tmpdir(), `laptop-lock-note-${process.pid}-${Date.now()}.ready`);
-  const windowScript = `$title=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psValue(safeTitle)}')); $body=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psValue(safeBody)}')); $ready=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${psValue(readyFile)}')); Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $form=New-Object Windows.Forms.Form; $form.Text=$title; $form.Size=New-Object Drawing.Size(360,380); $form.StartPosition='CenterScreen'; $form.BackColor=[Drawing.Color]::FromArgb(255,247,174); $form.TopMost=$true; $label=New-Object Windows.Forms.Label; $label.Text=$title; $label.Font=New-Object Drawing.Font('Segoe UI',13,[Drawing.FontStyle]::Bold); $label.Location=New-Object Drawing.Point(16,14); $label.Size=New-Object Drawing.Size(310,30); $text=New-Object Windows.Forms.TextBox; $text.Multiline=$true; $text.ReadOnly=$true; $text.ScrollBars='Vertical'; $text.BorderStyle='None'; $text.BackColor=$form.BackColor; $text.Font=New-Object Drawing.Font('Segoe UI',11); $text.Location=New-Object Drawing.Point(16,52); $text.Size=New-Object Drawing.Size(310,270); $text.Text=$body; $form.Controls.Add($label); $form.Controls.Add($text); $form.Add_Shown({ [IO.File]::WriteAllText($ready,'shown'); $form.Activate() }); [Windows.Forms.Application]::Run($form)`;
-  const encodedScript = Buffer.from(windowScript, "utf16le").toString("base64");
-  let noteWindowVisible = false;
-  try {
-    const noteWindow = spawn("powershell.exe", ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript], { shell: false, windowsHide: true, detached: true, stdio: "ignore" });
-    await new Promise((resolve, reject) => {
-      noteWindow.once("error", reject);
-      noteWindow.once("spawn", resolve);
-    });
-    noteWindow.unref();
-
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      if (fs.existsSync(readyFile)) {
-        noteWindowVisible = true;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  } catch (error) {
-    console.warn("Could not launch sticky note window; opening the saved note instead:", error.message);
-  } finally {
-    try { fs.unlinkSync(readyFile); } catch {}
-  }
-
-  if (!noteWindowVisible) {
-    const noteEditor = spawn("notepad.exe", [notePath], { shell: false, windowsHide: false, detached: true, stdio: "ignore" });
-    await new Promise((resolve, reject) => {
-      noteEditor.once("error", reject);
-      noteEditor.once("spawn", resolve);
-    });
-    noteEditor.unref();
-  }
-
-  return { saved: true, displayed: true, display_method: noteWindowVisible ? "sticky_note" : "text_editor_fallback", location: "Documents/Laptop Lock Notes", file_name: fileName };
+  const content = Buffer.from(`${safeTitle}\r\n${safeBody}`, "utf8").toString("base64");
+  const script = `$ErrorActionPreference='Stop'; $app=Get-StartApps | Where-Object { $_.AppID -match 'Microsoft\\.MicrosoftStickyNotes' } | Select-Object -First 1; if(-not $app){throw 'Microsoft Sticky Notes is not installed for this Windows user'}; Add-Type -AssemblyName System.Windows.Forms; $content=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${content}')); [Windows.Forms.Clipboard]::SetText($content); Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList ('shell:AppsFolder\\' + $app.AppID); $shell=New-Object -ComObject WScript.Shell; $active=$false; for($i=0; $i -lt 24 -and -not $active; $i++){ Start-Sleep -Milliseconds 400; $active=$shell.AppActivate($app.Name); if(-not $active){ $window=Get-Process | Where-Object { $_.MainWindowTitle -match 'Sticky|Notes' -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1; if($window){ $active=$shell.AppActivate($window.Id) } } }; if(-not $active){throw 'Could not activate Microsoft Sticky Notes'}; Start-Sleep -Milliseconds 300; $shell.SendKeys('^n'); Start-Sleep -Milliseconds 500; $shell.SendKeys('^v'); Start-Sleep -Milliseconds 300; 'STICKY_NOTE_CREATED'`;
+  await runPowerShell(script, 20000, true);
+  return { saved: true, displayed: true, display_method: "microsoft_sticky_notes", location: "Microsoft Sticky Notes; backup in Documents/Laptop Lock Notes", file_name: fileName };
 }
 
 function lockWindows() {

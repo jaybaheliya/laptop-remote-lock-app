@@ -1,6 +1,6 @@
 # Laptop Remote Lock Agent — Windows Installer Build Guide
 
-This directory packages the background Windows workstation agent into a single, clean `.exe` installer using **Inno Setup 6 (x64)**. Installer version `1.2.0` includes the current agent implementation and bundled Node.js runtime.
+This directory packages the background Windows workstation agent into a single, clean `.exe` installer using **Inno Setup 6 (x64)**. Installer version `1.3.0` includes the current agent implementation and bundled Node.js runtime.
 
 ---
 
@@ -79,5 +79,5 @@ Run `update-agent.bat` from the repository root on the Windows workstation. It s
 7. Paste the Pairing Key into the setup wizard and complete the installation.
 8. The workstation is paired and reports online on the dashboard. The controller supports network, storage, and memory status; typed messages; panic screenshot-and-lock; visible-app task listing and end-task requests; and quick notes saved on the workstation.
 
-Quick notes are saved to the user's Documents folder and shown in the agent's built-in note window; they are not saved to Microsoft's Sticky Notes application.
+Quick notes are created in Microsoft Sticky Notes using its supported keyboard shortcuts. A text backup is saved to the user's Documents folder. If Sticky Notes is missing or cannot be opened, the agent reports a delivery failure rather than claiming the note was added.
 
