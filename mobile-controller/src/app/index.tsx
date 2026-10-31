@@ -2960,7 +2960,8 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    fontSize: 14,
+    // iOS Safari zooms the page when a focused input uses a font smaller than 16px.
+    fontSize: 16,
     color: "#f8fafc",
     marginBottom: 14,
   },
