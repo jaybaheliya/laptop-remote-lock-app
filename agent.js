@@ -652,16 +652,117 @@ async function closeWebBrowsers() {
   }
 }
 
+function getCandidateFolderPaths(folderName) {
+  const userProfile = process.env.USERPROFILE || "";
+  const oneDrive = process.env.OneDrive || path.join(userProfile, "OneDrive");
+  const candidates = [];
+  if (folderName === "Desktop") {
+    candidates.push(path.join(oneDrive, "Desktop"));
+    candidates.push(path.join(userProfile, "Desktop"));
+  } else if (folderName === "Documents") {
+    candidates.push(path.join(oneDrive, "Documents"));
+    candidates.push(path.join(userProfile, "Documents"));
+  } else {
+    candidates.push(path.join(userProfile, "Downloads"));
+    candidates.push(path.join(oneDrive, "Downloads"));
+  }
+  return candidates.filter((p) => {
+    try {
+      return fs.existsSync(p) && fs.statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+}
+
 async function getFolderFiles(folderName = "Desktop") {
   const safeFolder = ["Desktop", "Documents", "Downloads"].includes(folderName) ? folderName : "Desktop";
-  const script = `$p = Join-Path $env:USERPROFILE '${safeFolder}'; if (Test-Path $p) { $items = Get-ChildItem -Path $p -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 20 @{n='name';e={$_.Name}}, @{n='size_kb';e={[math]::Round($_.Length/1KB,1)}}, @{n='modified';e={$_.LastWriteTime.ToString("yyyy-MM-dd HH:mm")}}; if ($items) { $items | ConvertTo-Json -Compress } else { '[]' } } else { '[]' }`;
-  const output = await runPowerShell(script, 10000);
-  try {
-    const parsed = JSON.parse(output);
-    return Array.isArray(parsed) ? parsed : [parsed];
-  } catch {
-    return [];
+  const candidateDirs = getCandidateFolderPaths(safeFolder);
+  const files = [];
+  const seenNames = new Set();
+
+  for (const dir of candidateDirs) {
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const lowerName = entry.name.toLowerCase();
+        if (lowerName === "desktop.ini" || lowerName.startsWith(".")) continue;
+        if (seenNames.has(lowerName)) continue;
+        seenNames.add(lowerName);
+
+        try {
+          const stat = fs.statSync(path.join(dir, entry.name));
+          files.push({
+            name: entry.name,
+            size_kb: Math.round((stat.size / 1024) * 10) / 10,
+            modified: stat.mtime.toISOString().slice(0, 16).replace("T", " "),
+            mtimeMs: stat.mtimeMs,
+          });
+        } catch {}
+      }
+    } catch {}
   }
+
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return files.slice(0, 30).map(({ name, size_kb, modified }) => ({ name, size_kb, modified }));
+}
+
+async function getLaptopFileContent(folderName, fileName) {
+  const safeFolder = ["Desktop", "Documents", "Downloads"].includes(folderName) ? folderName : "Desktop";
+  const safeName = path.basename(fileName);
+  const candidateDirs = getCandidateFolderPaths(safeFolder);
+  let targetPath = null;
+
+  for (const dir of candidateDirs) {
+    const candidate = path.join(dir, safeName);
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      targetPath = candidate;
+      break;
+    }
+  }
+
+  if (!targetPath) {
+    throw new Error(`File "${safeName}" not found in ${safeFolder}.`);
+  }
+
+  const stat = fs.statSync(targetPath);
+  if (stat.size > 20 * 1024 * 1024) {
+    throw new Error(`File is too large (${Math.round(stat.size / 1024 / 1024)} MB). Maximum download size is 20 MB.`);
+  }
+
+  const buffer = fs.readFileSync(targetPath);
+  return {
+    file_name: safeName,
+    size_kb: Math.round((stat.size / 1024) * 10) / 10,
+    base64: buffer.toString("base64"),
+  };
+}
+
+async function deleteLaptopFile(folderName, fileName) {
+  const safeFolder = ["Desktop", "Documents", "Downloads"].includes(folderName) ? folderName : "Desktop";
+  const safeName = path.basename(fileName);
+  const candidateDirs = getCandidateFolderPaths(safeFolder);
+  let targetPath = null;
+
+  for (const dir of candidateDirs) {
+    const candidate = path.join(dir, safeName);
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      targetPath = candidate;
+      break;
+    }
+  }
+
+  if (!targetPath) {
+    throw new Error(`File "${safeName}" not found in ${safeFolder}.`);
+  }
+
+  fs.unlinkSync(targetPath);
+  return {
+    deleted: true,
+    file_name: safeName,
+    folder: safeFolder,
+  };
 }
 
 function getUnlockScriptPath() {
@@ -1129,6 +1230,16 @@ async function pollOnce() {
           const folder = String(commandPayload.folder || "Downloads");
           const files = await getFolderFiles(folder);
           commandResult = { mode: "files", folder, files };
+        } else if (commandPayload.mode === "get_file") {
+          const folder = String(commandPayload.folder || "Downloads");
+          const fileName = String(commandPayload.file_name || "");
+          const fileData = await getLaptopFileContent(folder, fileName);
+          commandResult = { mode: "get_file", folder, ...fileData };
+        } else if (commandPayload.mode === "delete_file") {
+          const folder = String(commandPayload.folder || "Downloads");
+          const fileName = String(commandPayload.file_name || "");
+          const deleteResult = await deleteLaptopFile(folder, fileName);
+          commandResult = { mode: "delete_file", folder, ...deleteResult };
         } else if (commandPayload.mode === "close_browsers") {
           const closeResult = await closeWebBrowsers();
           commandResult = { mode: "close_browsers", ...closeResult };

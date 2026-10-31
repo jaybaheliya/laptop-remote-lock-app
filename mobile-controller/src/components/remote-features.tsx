@@ -68,6 +68,9 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
   const [filesLoading, setFilesLoading] = useState(false);
   const [hasFetched, setHasFetched] = useState(false);
   const [closingBrowsers, setClosingBrowsers] = useState(false);
+  const [downloadingFileName, setDownloadingFileName] = useState<string | null>(null);
+  const [sharingFileName, setSharingFileName] = useState<string | null>(null);
+  const [deletingFileName, setDeletingFileName] = useState<string | null>(null);
 
   const loadRecordings = useCallback(async () => {
     setRecordingsLoading(true);
@@ -523,6 +526,150 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
     }
   }
 
+  async function handleSaveFile(file: RecentFile) {
+    if (!online) {
+      Alert.alert("Laptop offline", "Cannot download files while laptop is offline.");
+      return;
+    }
+    setDownloadingFileName(file.name);
+    try {
+      const commandId = await sendCommand("task_list", { mode: "get_file", folder: selectedFolder, file_name: file.name });
+      if (!commandId) return;
+      const result = await waitForRecordingCommand(commandId);
+      setLocalActiveCommand(null);
+
+      const base64 = typeof result?.base64 === "string" ? result.base64 : null;
+      if (!base64) throw new Error("No file content received from laptop.");
+
+      if (Platform.OS === "web" && typeof window !== "undefined") {
+        const byteCharacters = atob(base64);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        const blob = new Blob([byteArray]);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        Alert.alert("File Downloaded", `Saved "${file.name}" to your device.`);
+      } else {
+        await Share.share({
+          title: file.name,
+          message: `Saved laptop file: ${file.name} (${file.size_kb} KB)`,
+          url: `data:application/octet-stream;base64,${base64}`,
+        });
+      }
+    } catch (err) {
+      setLocalActiveCommand(null);
+      Alert.alert("Could not save file", err instanceof Error ? err.message : "Try again when laptop is online.");
+    } finally {
+      setDownloadingFileName(null);
+    }
+  }
+
+  async function handleShareFile(file: RecentFile) {
+    if (!online) {
+      Alert.alert("Laptop offline", "Cannot share files while laptop is offline.");
+      return;
+    }
+    setSharingFileName(file.name);
+    try {
+      const commandId = await sendCommand("task_list", { mode: "get_file", folder: selectedFolder, file_name: file.name });
+      if (!commandId) return;
+      const result = await waitForRecordingCommand(commandId);
+      setLocalActiveCommand(null);
+
+      const base64 = typeof result?.base64 === "string" ? result.base64 : null;
+      if (!base64) throw new Error("No file content received from laptop.");
+
+      if (Platform.OS === "web" && typeof window !== "undefined") {
+        const byteCharacters = atob(base64);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        const blob = new Blob([byteArray]);
+
+        if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+          try {
+            const webFile = new File([blob], file.name);
+            if (navigator.canShare && navigator.canShare({ files: [webFile] })) {
+              await navigator.share({ files: [webFile], title: file.name });
+              return;
+            }
+          } catch {
+            // fallback to download
+          }
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        Alert.alert("File Ready", `Downloaded "${file.name}" to share.`);
+      } else {
+        await Share.share({
+          title: file.name,
+          message: `Laptop File: ${file.name} (${file.size_kb} KB)`,
+          url: `data:application/octet-stream;base64,${base64}`,
+        });
+      }
+    } catch (err) {
+      setLocalActiveCommand(null);
+      Alert.alert("Could not share file", err instanceof Error ? err.message : "Try again when laptop is online.");
+    } finally {
+      setSharingFileName(null);
+    }
+  }
+
+  function confirmDeleteFile(file: RecentFile) {
+    if (!online) {
+      Alert.alert("Laptop offline", "Cannot delete files while laptop is offline.");
+      return;
+    }
+    const execute = async () => {
+      setDeletingFileName(file.name);
+      try {
+        const commandId = await sendCommand("task_list", { mode: "delete_file", folder: selectedFolder, file_name: file.name });
+        if (!commandId) return;
+        await waitForRecordingCommand(commandId);
+        setLocalActiveCommand(null);
+        setFiles((current) => current.filter((f) => f.name !== file.name));
+        Alert.alert("File Deleted", `"${file.name}" was permanently removed from your laptop.`);
+      } catch (err) {
+        setLocalActiveCommand(null);
+        Alert.alert("Could not delete file", err instanceof Error ? err.message : "Try again when laptop is online.");
+      } finally {
+        setDeletingFileName(null);
+      }
+    };
+
+    if (Platform.OS === "web") {
+      if (typeof window !== "undefined" && window.confirm(`Permanently delete "${file.name}" from your laptop's ${selectedFolder}?`)) {
+        void execute();
+      }
+      return;
+    }
+    Alert.alert(
+      `Delete "${file.name}"?`,
+      `This permanently deletes the file from your laptop's ${selectedFolder} folder.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: () => void execute() },
+      ]
+    );
+  }
+
   function getFileIcon(name: string) {
     const ext = name.split(".").pop()?.toLowerCase();
     switch (ext) {
@@ -635,14 +782,60 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           <TouchableOpacity style={[styles.secondaryButton, (!online || filesLoading || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={() => void refreshFiles(selectedFolder)} disabled={!online || filesLoading || sending || commandBusy || !!localActiveCommand}>
             {filesLoading ? <ActivityIndicator color="#bfdbfe" size="small" /> : <Text style={styles.secondaryButtonText}>Fetch {selectedFolder} files</Text>}
           </TouchableOpacity>
-          {files.map((file, idx) => (
-            <View key={file.name + idx} style={styles.fileRow}>
-              <View style={styles.fileDetails}>
-                <Text style={styles.fileName} numberOfLines={1}>{getFileIcon(file.name)} {file.name}</Text>
-                <Text style={styles.fileMeta}>{file.size_kb} KB • {file.modified}</Text>
+          {files.map((file, idx) => {
+            const isDownloading = downloadingFileName === file.name;
+            const isSharing = sharingFileName === file.name;
+            const isDeleting = deletingFileName === file.name;
+            const isItemBusy = isDownloading || isSharing || isDeleting || !online || filesLoading || sending || commandBusy || !!localActiveCommand;
+
+            return (
+              <View key={file.name + idx} style={styles.fileCard}>
+                <View style={styles.fileHeaderRow}>
+                  <View style={styles.fileDetails}>
+                    <Text style={styles.fileName} numberOfLines={1}>{getFileIcon(file.name)} {file.name}</Text>
+                    <Text style={styles.fileMeta}>{file.size_kb} KB • {file.modified}</Text>
+                  </View>
+                </View>
+                <View style={styles.fileCtaRow}>
+                  <TouchableOpacity
+                    style={[styles.fileCtaBtn, styles.fileCtaSave, isItemBusy && styles.disabled]}
+                    onPress={() => void handleSaveFile(file)}
+                    disabled={isItemBusy}
+                  >
+                    {isDownloading ? (
+                      <ActivityIndicator size="small" color="#38bdf8" />
+                    ) : (
+                      <Text style={styles.fileCtaSaveText}>💾 Save</Text>
+                    )}
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.fileCtaBtn, styles.fileCtaShare, isItemBusy && styles.disabled]}
+                    onPress={() => void handleShareFile(file)}
+                    disabled={isItemBusy}
+                  >
+                    {isSharing ? (
+                      <ActivityIndicator size="small" color="#93c5fd" />
+                    ) : (
+                      <Text style={styles.fileCtaShareText}>🔗 Share</Text>
+                    )}
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.fileCtaBtn, styles.fileCtaDelete, isItemBusy && styles.disabled]}
+                    onPress={() => confirmDeleteFile(file)}
+                    disabled={isItemBusy}
+                  >
+                    {isDeleting ? (
+                      <ActivityIndicator size="small" color="#fda4af" />
+                    ) : (
+                      <Text style={styles.fileCtaDeleteText}>🗑️ Delete</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
               </View>
-            </View>
-          ))}
+            );
+          })}
           {!filesLoading && files.length === 0 && (
             <Text style={styles.muted}>
               {hasFetched ? `No loose files found in ${selectedFolder}.` : `Tap Fetch to list recent ${selectedFolder} files.`}
@@ -853,8 +1046,54 @@ const styles = StyleSheet.create({
   folderPillActive: { backgroundColor: "rgba(37, 99, 235, 0.25)", borderColor: "#3b82f6" },
   folderPillText: { color: "#94a3b8", fontSize: 12, fontWeight: "600" },
   folderPillTextActive: { color: "#93c5fd", fontWeight: "800" },
-  fileRow: { minHeight: 46, flexDirection: "row", alignItems: "center", gap: 10, borderTopColor: "#1e293b", borderTopWidth: 1, paddingTop: 6, paddingBottom: 6 },
+  fileCard: {
+    width: "100%",
+    backgroundColor: "rgba(15, 23, 42, 0.72)",
+    borderWidth: 1,
+    borderColor: "rgba(148, 163, 184, 0.15)",
+    borderRadius: 12,
+    padding: 10,
+    marginTop: 6,
+    gap: 8,
+  },
+  fileHeaderRow: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+  },
   fileDetails: { flex: 1, minWidth: 0, gap: 2 },
   fileName: { color: "#f1f5f9", fontSize: 13, fontWeight: "700" },
-  fileMeta: { color: "#64748b", fontSize: 11 },
+  fileMeta: { color: "#94a3b8", fontSize: 11 },
+  fileCtaRow: {
+    flexDirection: "row",
+    gap: 7,
+    width: "100%",
+  },
+  fileCtaBtn: {
+    flex: 1,
+    minHeight: 36,
+    borderRadius: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
+    paddingVertical: 6,
+  },
+  fileCtaSave: {
+    backgroundColor: "rgba(56, 189, 248, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.35)",
+  },
+  fileCtaSaveText: { color: "#38bdf8", fontSize: 11, fontWeight: "700" },
+  fileCtaShare: {
+    backgroundColor: "rgba(59, 130, 246, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(59, 130, 246, 0.35)",
+  },
+  fileCtaShareText: { color: "#93c5fd", fontSize: 11, fontWeight: "700" },
+  fileCtaDelete: {
+    backgroundColor: "rgba(239, 68, 68, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.35)",
+  },
+  fileCtaDeleteText: { color: "#fda4af", fontSize: 11, fontWeight: "700" },
 });
