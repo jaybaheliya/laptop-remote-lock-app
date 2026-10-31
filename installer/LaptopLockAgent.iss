@@ -5,7 +5,7 @@
 ; =====================================================================
 
 #define MyAppName "Laptop Remote Lock Agent"
-#define MyAppVersion "1.5.1"
+#define MyAppVersion "1.5.2"
 #define MyAppPublisher "Security Defense Console"
 #define MyAppExeName "start-agent-hidden.vbs"
 
@@ -38,12 +38,14 @@ Source: "runner\start-agent.bat"; DestDir: "{app}\runner"; Flags: ignoreversion
 Source: "runner\start-agent-hidden.vbs"; DestDir: "{app}\runner"; Flags: ignoreversion
 ; Portable Node runtime (Embedded if bin\node.exe is present)
 Source: "bin\node.exe"; DestDir: "{app}\bin"; Flags: ignoreversion skipifsourcedoesntexist
+; Bundled offline FFmpeg screen recording engine
+Source: "tools\ffmpeg\*"; DestDir: "{localappdata}\LaptopLockAgent\tools\ffmpeg"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{userstartup}\LaptopLockAgent"; Filename: "wscript.exe"; Parameters: """{app}\runner\start-agent-hidden.vbs"""; WorkingDir: "{app}\runner"
 
 [Registry]
+; Single, reliable auto-start on user logon (works on AC and battery power)
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "LaptopLockAgent"; ValueData: """wscript.exe"" ""{app}\runner\start-agent-hidden.vbs"""; Flags: uninsdeletevalue
 
 [Run]
@@ -59,12 +61,12 @@ var
   ErrorCode: Integer;
   Params: String;
 begin
+  if not FileExists(ExpandConstant('{app}\runner\stop-agent.ps1')) or
+     not FileExists(ExpandConstant('{app}\app\agent.js')) then
+    Exit;
+
   Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\runner\stop-agent.ps1') + '" -AgentScriptPath "' + ExpandConstant('{app}\app\agent.js') + '"';
-  if not Exec('powershell.exe', Params, '', SW_HIDE, ewWaitUntilTerminated, ErrorCode) or (ErrorCode <> 0) then
-  begin
-    MsgBox('Could not stop the existing Laptop Lock agent safely. Setup has cancelled without changing the installation.', mbError, MB_OK);
-    Abort;
-  end;
+  Exec('powershell.exe', Params, '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
 end;
 
 procedure InitializeWizard;
@@ -100,7 +102,7 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ConfigDir, ConfigPath, TaskCmd, PairKeyRaw: String;
+  ConfigDir, ConfigPath, PairKeyRaw: String;
   ErrorCode: Integer;
 begin
   if CurStep = ssPostInstall then
@@ -109,7 +111,12 @@ begin
     ConfigPath := ConfigDir + '\config.json';
     ForceDirectories(ConfigDir);
 
+    // End and delete legacy scheduled task if present from prior versions
     Exec('schtasks.exe', '/End /TN "LaptopLockAgent"', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
+    Exec('schtasks.exe', '/Delete /TN "LaptopLockAgent" /F', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
+
+    // Remove legacy startup folder shortcut to avoid duplicate instance conflicts
+    DeleteFile(ExpandConstant('{userstartup}\LaptopLockAgent.lnk'));
 
     PairKeyRaw := '';
     if Assigned(PairingPage) then PairKeyRaw := Trim(PairingPage.Values[0]);
@@ -122,23 +129,24 @@ begin
 
     // Let the installed launcher start the updated agent again.
     DeleteFile(ExpandConstant('{localappdata}\LaptopLockAgent\agent.stop'));
-
-    // Secure config folder: restrict ACLs exclusively to current user
-    Exec('icacls.exe', '"' + ConfigDir + '" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
-
-    // Register Windows Task Scheduler task (runs silently on user sign-in)
-    TaskCmd := '/Create /TN "LaptopLockAgent" /TR "wscript.exe \""' + ExpandConstant('{app}\runner\start-agent-hidden.vbs') + '\""" /SC ONLOGON /RL LIMITED /F';
-    Exec('schtasks.exe', TaskCmd, '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
   end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   ErrorCode: Integer;
-  ConfigDir: String;
+  ConfigDir, Params: String;
 begin
   if CurUninstallStep = usUninstall then
   begin
+    // Safely stop running agent
+    if FileExists(ExpandConstant('{app}\runner\stop-agent.ps1')) and
+       FileExists(ExpandConstant('{app}\app\agent.js')) then
+    begin
+      Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\runner\stop-agent.ps1') + '" -AgentScriptPath "' + ExpandConstant('{app}\app\agent.js') + '"';
+      Exec('powershell.exe', Params, '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
+    end;
+
     // Terminate existing agent task & scheduled task
     Exec('schtasks.exe', '/End /TN "LaptopLockAgent"', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
     Exec('schtasks.exe', '/Delete /TN "LaptopLockAgent" /F', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
@@ -151,4 +159,3 @@ begin
     end;
   end;
 end;
-

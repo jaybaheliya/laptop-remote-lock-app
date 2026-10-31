@@ -401,8 +401,19 @@ async function saveLaptopNote(title, body) {
   fs.writeFileSync(notePath, `${safeTitle}\r\n\r\n${safeBody}`, "utf8");
   const content = Buffer.from(`${safeTitle}\r\n${safeBody}`, "utf8").toString("base64");
   const script = `$ErrorActionPreference='Stop'; $app=Get-StartApps | Where-Object { $_.AppID -match 'Microsoft\\.MicrosoftStickyNotes' } | Select-Object -First 1; if(-not $app){throw 'Microsoft Sticky Notes is not installed for this Windows user'}; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName UIAutomationClient; Add-Type -AssemblyName UIAutomationTypes; $content=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${content}')); [Windows.Forms.Clipboard]::SetText($content); Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList ('shell:AppsFolder\\' + $app.AppID); $shell=New-Object -ComObject WScript.Shell; $active=$false; for($i=0; $i -lt 30 -and -not $active; $i++){ Start-Sleep -Milliseconds 400; $active=$shell.AppActivate($app.Name); if(-not $active){ $window=Get-Process | Where-Object { $_.MainWindowTitle -match 'Sticky|Notes' -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1; if($window){ $active=$shell.AppActivate($window.Id) } } }; if(-not $active){throw 'Could not activate Microsoft Sticky Notes'}; $loading=$true; for($i=0; $i -lt 30 -and $loading; $i++){ try { $texts=[System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Text))); $loading=$false; foreach($item in $texts){ if($item.Current.Name -match '^Loading Sticky Notes'){ $loading=$true; break } } } catch { throw 'Could not verify that Microsoft Sticky Notes finished loading; the backup note was saved in Documents\\Laptop Lock Notes' }; if($loading){ Start-Sleep -Seconds 1 } }; if($loading){throw 'Microsoft Sticky Notes is still stuck on Loading Sticky Notes; the backup note was saved in Documents\\Laptop Lock Notes'}; $active=$shell.AppActivate($app.Name); if(-not $active){throw 'Microsoft Sticky Notes finished loading but could not be activated; the backup note was saved in Documents\\Laptop Lock Notes'}; Start-Sleep -Milliseconds 300; $shell.SendKeys('^n'); Start-Sleep -Milliseconds 500; $shell.SendKeys('^v'); Start-Sleep -Milliseconds 300; 'STICKY_NOTE_CREATED'`;
-  await runPowerShell(script, 45000, true);
-  return { saved: true, displayed: true, display_method: "microsoft_sticky_notes", location: "Microsoft Sticky Notes; backup in Documents/Laptop Lock Notes", file_name: fileName };
+  try {
+    await runPowerShell(script, 45000, true);
+    return { saved: true, displayed: true, display_method: "microsoft_sticky_notes", location: "Microsoft Sticky Notes; backup in Documents/Laptop Lock Notes", file_name: fileName };
+  } catch (stickyErr) {
+    // Graceful fallback to Notepad if Sticky Notes is not installed or failed to open
+    try {
+      const escapedNotePath = notePath.replace(/'/g, "''");
+      await runPowerShell(`Start-Process -FilePath 'notepad.exe' -ArgumentList '${escapedNotePath}'`, 10000);
+      return { saved: true, displayed: true, display_method: "notepad", location: "Opened in Notepad; saved in Documents/Laptop Lock Notes", file_name: fileName };
+    } catch {
+      return { saved: true, displayed: false, location: "Saved in Documents/Laptop Lock Notes", file_name: fileName };
+    }
+  }
 }
 
 function lockWindows() {
@@ -645,16 +656,26 @@ const FFMPEG_ARCHIVE_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/downl
 const FFMPEG_ARCHIVE_SHA256 = "72e3fbaf17f8d5162c3010f9e58872fcb93ba2b03731fd0fff1ca9aabb616ea6";
 
 async function ensureFfmpeg() {
-  const toolsDir = path.join(config.configDir, "tools", "ffmpeg");
-  const executable = path.join(toolsDir, "ffmpeg.exe");
-  if (fs.existsSync(executable)) {
-    try {
-      await runProcess(executable, ["-version"], 10000);
-      return executable;
-    } catch {
-      fs.rmSync(executable, { force: true });
+  const candidateDirs = [
+    path.join(config.configDir, "tools", "ffmpeg"),
+    path.join(__dirname, "..", "tools", "ffmpeg"),
+    path.join(__dirname, "tools", "ffmpeg"),
+  ];
+
+  for (const toolsDir of candidateDirs) {
+    const executable = path.join(toolsDir, "ffmpeg.exe");
+    if (fs.existsSync(executable)) {
+      try {
+        await runProcess(executable, ["-version"], 10000);
+        return executable;
+      } catch {
+        // Continue checking other candidates
+      }
     }
   }
+
+  const toolsDir = path.join(config.configDir, "tools", "ffmpeg");
+  const executable = path.join(toolsDir, "ffmpeg.exe");
   if (ffmpegDownloadPromise) return ffmpegDownloadPromise;
 
   ffmpegDownloadPromise = (async () => {
