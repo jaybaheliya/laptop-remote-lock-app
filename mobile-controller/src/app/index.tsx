@@ -88,7 +88,7 @@ export default function HomeScreen() {
   const [commandHistory, setCommandHistory] = useState<LockCommand[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [actionSubmitting, setActionSubmitting] = useState<
-    "lock" | "sleep" | "shutdown" | "screenshot" | "unlock" | null
+    "lock" | "sleep" | "shutdown" | "screenshot" | "unlock" | "webcam" | null
   >(null);
   const lockSubmitting = actionSubmitting !== null;
   const [latestScreenshot, setLatestScreenshot] = useState<ScreenshotItem | null>(null);
@@ -713,7 +713,8 @@ export default function HomeScreen() {
   }
 
   async function executeRemoteAction(
-    action: "lock" | "sleep" | "shutdown" | "screenshot" | "unlock"
+    action: "lock" | "sleep" | "shutdown" | "screenshot" | "unlock",
+    payload: Record<string, unknown> = {}
   ) {
     if (!session?.access_token || !device?.id) {
       Alert.alert(
@@ -731,14 +732,14 @@ export default function HomeScreen() {
       return;
     }
 
-    setActionSubmitting(action);
+    setActionSubmitting(payload.source === "webcam" ? "webcam" : action);
     setMessage("");
 
     try {
       const { data, error } = await supabase.functions.invoke(
         "request-lock",
         {
-          body: { device_id: device.id, action },
+          body: { device_id: device.id, action, payload },
         }
       );
 
@@ -760,7 +761,9 @@ export default function HomeScreen() {
         lock: "Lock command dispatched! Windows workstation will lock shortly.",
         sleep: "Sleep command dispatched! Windows workstation is entering sleep mode.",
         shutdown: "Shutdown command dispatched! Windows workstation will shut down in 10 seconds.",
-        screenshot: "Screenshot command dispatched! Windows agent is capturing your desktop...",
+        screenshot: payload.source === "webcam"
+          ? "Intruder webcam capture dispatched! Snapping camera..."
+          : "Screenshot command dispatched! Windows agent is capturing your desktop...",
         unlock: "Wake command dispatched! Windows sign-in remains under local user control.",
       };
 
@@ -1382,6 +1385,42 @@ export default function HomeScreen() {
                   </View>
                 )}
 
+                {/* Security Alert: Charger Disconnected Banner */}
+                {device.power_online === false && typeof device.battery_level === "number" && (
+                  <View style={styles.chargerDisconnectBanner}>
+                    <View style={styles.chargerDisconnectHeader}>
+                      <View style={styles.chargerDisconnectBadge}>
+                        <View style={styles.chargerDisconnectPulse} />
+                        <Text style={styles.chargerDisconnectBadgeText}>⚡ POWER UNPLUGGED</Text>
+                      </View>
+                      <Text style={styles.chargerDisconnectMeta}>
+                        Battery: {device.battery_level}%
+                      </Text>
+                    </View>
+                    <Text style={styles.chargerDisconnectNotice}>
+                      AC charger was unplugged. If you didn't unplug it, your laptop may have been moved or tampered with.
+                    </Text>
+                    <View style={styles.chargerDisconnectActions}>
+                      <TouchableOpacity
+                        style={styles.chargerDisconnectLockBtn}
+                        onPress={handleLockLaptop}
+                        disabled={actionSubmitting !== null || isCommandActive}
+                      >
+                        <Text style={styles.chargerDisconnectLockText}>🔒 Lock Laptop</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.chargerDisconnectCamBtn}
+                        onPress={() => void executeRemoteAction("screenshot", { source: "webcam" })}
+                        disabled={actionSubmitting !== null || isCommandActive}
+                      >
+                        <Text style={styles.chargerDisconnectCamText}>
+                          {actionSubmitting === "webcam" ? "Snapping..." : "📸 Snap Intruder"}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+
                 {/* Quick Diagnostics Chips */}
                 <View style={styles.specsGrid}>
                   <View style={styles.specChip}>
@@ -1624,21 +1663,38 @@ export default function HomeScreen() {
                 <View style={styles.screenshotCard}>
                   <View style={styles.screenshotHeader}>
                     <View style={styles.screenshotHeaderTitleRow}>
-                      <Text style={styles.screenshotCardTitle}>📸 SCREENSHOT</Text>
+                      <Text style={styles.screenshotCardTitle}>📸 SURVEILLANCE</Text>
                       <View style={styles.liveIndicator}>
                         <View style={styles.liveIndicatorDot} />
                         <Text style={styles.liveIndicatorText}>ANTI-THEFT</Text>
                       </View>
                     </View>
-                    <TouchableOpacity
-                      style={styles.refreshScreenshotBtn}
-                      onPress={() => void executeRemoteAction("screenshot")}
-                      disabled={actionSubmitting !== null || isCommandActive}
-                    >
-                      <Text style={styles.refreshScreenshotBtnText}>
-                        {actionSubmitting === "screenshot" ? "Capturing..." : "🔄 Capture"}
-                      </Text>
-                    </TouchableOpacity>
+                    <View style={styles.surveillanceActionGroup}>
+                      <TouchableOpacity
+                        style={[
+                          styles.refreshScreenshotBtn,
+                          actionSubmitting === "screenshot" && styles.heroLockBtnDisabled,
+                        ]}
+                        onPress={() => void executeRemoteAction("screenshot", { source: "screen" })}
+                        disabled={actionSubmitting !== null || isCommandActive}
+                      >
+                        <Text style={styles.refreshScreenshotBtnText}>
+                          {actionSubmitting === "screenshot" ? "Capturing..." : "🖥️ Screen"}
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.webcamScreenshotBtn,
+                          actionSubmitting === "webcam" && styles.heroLockBtnDisabled,
+                        ]}
+                        onPress={() => void executeRemoteAction("screenshot", { source: "webcam" })}
+                        disabled={actionSubmitting !== null || isCommandActive}
+                      >
+                        <Text style={styles.webcamScreenshotBtnText}>
+                          {actionSubmitting === "webcam" ? "Snapping..." : "📸 Intruder Cam"}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
 
                   {latestScreenshot ? (
@@ -3271,6 +3327,108 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     color: "#38bdf8",
+  },
+  surveillanceActionGroup: {
+    flexDirection: "row",
+    gap: 6,
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+  },
+  webcamScreenshotBtn: {
+    backgroundColor: "rgba(239, 68, 68, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.4)",
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    flexShrink: 0,
+    alignSelf: "center",
+  },
+  webcamScreenshotBtnText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#f87171",
+  },
+  chargerDisconnectBanner: {
+    backgroundColor: "rgba(239, 68, 68, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.35)",
+    borderRadius: 14,
+    padding: 14,
+    marginTop: 12,
+    marginBottom: 4,
+    gap: 8,
+  },
+  chargerDisconnectHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  chargerDisconnectBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "rgba(239, 68, 68, 0.25)",
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+  },
+  chargerDisconnectPulse: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#ef4444",
+  },
+  chargerDisconnectBadgeText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#fca5a5",
+    letterSpacing: 0.5,
+  },
+  chargerDisconnectMeta: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#cbd5e1",
+  },
+  chargerDisconnectNotice: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: "#e2e8f0",
+  },
+  chargerDisconnectActions: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 4,
+  },
+  chargerDisconnectLockBtn: {
+    flex: 1,
+    backgroundColor: "#ef4444",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  chargerDisconnectLockText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#ffffff",
+  },
+  chargerDisconnectCamBtn: {
+    flex: 1,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.25)",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  chargerDisconnectCamText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#f8fafc",
   },
   screenshotPreviewContainer: {
     width: "100%",

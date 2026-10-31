@@ -589,6 +589,81 @@ function captureScreen() {
   });
 }
 
+async function captureWebcam() {
+  const ffmpeg = await ensureFfmpeg();
+
+  // Enumerate DirectShow video devices
+  const device = await new Promise((resolve) => {
+    const child = spawn(ffmpeg, ["-list_devices", "true", "-f", "dshow", "-i", "dummy"], { windowsHide: true });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.once("close", () => {
+      const match = stderr.match(/"([^"]+)"\s+\(video\)/);
+      resolve(match ? match[1] : null);
+    });
+    child.once("error", () => resolve(null));
+  });
+
+  const tempPath = path.join(os.tmpdir(), `webcam_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.jpg`);
+  const deviceArg = device ? `video=${device}` : "video=Integrated Webcam";
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(ffmpeg, [
+      "-hide_banner",
+      "-loglevel", "error",
+      "-y",
+      "-f", "dshow",
+      "-i", deviceArg,
+      "-frames:v", "1",
+      "-update", "1",
+      tempPath,
+    ], { windowsHide: true });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.once("close", (code) => {
+      if (code === 0 && fs.existsSync(tempPath)) {
+        resolve();
+      } else {
+        reject(new Error(`Webcam capture failed (exit ${code}): ${stderr.trim() || "No camera frame received"}`));
+      }
+    });
+    child.once("error", reject);
+  });
+
+  try {
+    const imgBuffer = fs.readFileSync(tempPath);
+    const base64Data = "data:image/jpeg;base64," + imgBuffer.toString("base64");
+    try { fs.unlinkSync(tempPath); } catch {}
+    return base64Data;
+  } catch (err) {
+    try { fs.unlinkSync(tempPath); } catch {}
+    throw err;
+  }
+}
+
+async function closeWebBrowsers() {
+  const script = `$ErrorActionPreference='SilentlyContinue'; $browsers = Get-Process -Name chrome, msedge, firefox, brave, opera -ErrorAction SilentlyContinue; if ($browsers) { $count = ($browsers | Measure-Object).Count; $browsers | Stop-Process -Force -ErrorAction SilentlyContinue; [PSCustomObject]@{ closed = $true; count = $count } | ConvertTo-Json -Compress } else { [PSCustomObject]@{ closed = $false; count = 0 } | ConvertTo-Json -Compress }`;
+  const output = await runPowerShell(script, 10000);
+  try {
+    return JSON.parse(output);
+  } catch {
+    return { closed: true, count: 0 };
+  }
+}
+
+async function getFolderFiles(folderName = "Desktop") {
+  const safeFolder = ["Desktop", "Documents", "Downloads"].includes(folderName) ? folderName : "Desktop";
+  const script = `$p = Join-Path $env:USERPROFILE '${safeFolder}'; if (Test-Path $p) { $items = Get-ChildItem -Path $p -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 20 @{n='name';e={$_.Name}}, @{n='size_kb';e={[math]::Round($_.Length/1KB,1)}}, @{n='modified';e={$_.LastWriteTime.ToString("yyyy-MM-dd HH:mm")}}; if ($items) { $items | ConvertTo-Json -Compress } else { '[]' } } else { '[]' }`;
+  const output = await runPowerShell(script, 10000);
+  try {
+    const parsed = JSON.parse(output);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
 function getUnlockScriptPath() {
   const scriptPath = path.join(os.tmpdir(), "win_unlock_worker.ps1");
   const scriptContent = `Add-Type -TypeDefinition @"
@@ -923,6 +998,8 @@ function getBatteryStatus() {
   });
 }
 
+let previousPowerOnline = null;
+
 async function pollOnce() {
   if (busy || stopped) return;
 
@@ -930,6 +1007,17 @@ async function pollOnce() {
 
   try {
     const battery = await getBatteryStatus();
+
+    // Security alert: Detect when AC charger is unplugged while away
+    if (battery && typeof battery.power_online === "boolean") {
+      if (previousPowerOnline === true && battery.power_online === false) {
+        console.warn(
+          `[SECURITY ALERT] AC Charger disconnected! Workstation is now running on battery (${battery.level ?? "unknown"}%).`
+        );
+      }
+      previousPowerOnline = battery.power_online;
+    }
+
     const telemetry = await getSystemTelemetry();
     const result = await callAgentPoll({ action: "poll", battery, telemetry });
     const command = result.command;
@@ -985,19 +1073,33 @@ async function pollOnce() {
       }
     } else if (action === "screenshot") {
       try {
-        console.log("Capturing desktop screenshot...");
-        imageData = await captureScreen();
-        console.log("Desktop screenshot captured successfully.");
+        const source = command.payload?.source || "screen";
+        if (source === "webcam") {
+          console.log("Capturing intruder webcam photo...");
+          imageData = await captureWebcam();
+          console.log("Intruder webcam photo captured successfully.");
+          commandResult = { source: "webcam", captured_at: new Date().toISOString() };
+        } else {
+          console.log("Capturing desktop screenshot...");
+          imageData = await captureScreen();
+          console.log("Desktop screenshot captured successfully.");
+          commandResult = { source: "screen", captured_at: new Date().toISOString() };
+        }
       } catch (error) {
         status = "failed";
         failureReason =
-          error instanceof Error ? error.message : "Screen capture execution failed";
-        console.error("Could not capture screen:", failureReason);
+          error instanceof Error ? error.message : "Capture execution failed";
+        console.error("Could not capture image:", failureReason);
       }
     } else if (action === "panic") {
       let wasLocked = false;
       try {
-        imageData = await captureScreen();
+        // Attempt webcam snapshot first to catch intruder, fallback to desktop
+        try {
+          imageData = await captureWebcam();
+        } catch {
+          imageData = await captureScreen();
+        }
       } catch (error) {
         status = "failed";
         failureReason = `Screenshot failed: ${error instanceof Error ? error.message : "unknown error"}`;
@@ -1013,10 +1115,19 @@ async function pollOnce() {
       commandResult = { locked: wasLocked, screenshot_captured: Boolean(imageData) };
     } else if (action === "task_list") {
       try {
-        commandResult = { tasks: await getRunningTasks() };
+        if (command.payload?.mode === "files") {
+          const folder = String(command.payload?.folder || "Desktop");
+          const files = await getFolderFiles(folder);
+          commandResult = { mode: "files", folder, files };
+        } else if (command.payload?.mode === "close_browsers") {
+          const closeResult = await closeWebBrowsers();
+          commandResult = { mode: "close_browsers", ...closeResult };
+        } else {
+          commandResult = { tasks: await getRunningTasks() };
+        }
       } catch (error) {
         status = "failed";
-        failureReason = error instanceof Error ? error.message : "Could not list running applications";
+        failureReason = error instanceof Error ? error.message : "Could not complete task action";
       }
     } else if (action === "end_task") {
       try {

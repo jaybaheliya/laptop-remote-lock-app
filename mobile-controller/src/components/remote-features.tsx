@@ -28,6 +28,7 @@ type Telemetry = {
 type RunningTask = { process_id: number; name: string; window: string; memory_mb: number };
 type QuickNote = { id: string; title: string; body: string; created_at: string };
 type ScreenRecording = { id: string; created_at: string; file_name: string; duration_seconds?: number; local_path?: string; storage_path?: string; sent_to_phone?: boolean; send_error?: string };
+type RecentFile = { name: string; size_kb: number; modified: string };
 
 type Props = {
   deviceId: string;
@@ -61,6 +62,11 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [appsExpanded, setAppsExpanded] = useState(false);
   const [notesExpanded, setNotesExpanded] = useState(false);
+  const [filesExpanded, setFilesExpanded] = useState(false);
+  const [selectedFolder, setSelectedFolder] = useState<"Desktop" | "Documents" | "Downloads">("Desktop");
+  const [files, setFiles] = useState<RecentFile[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [closingBrowsers, setClosingBrowsers] = useState(false);
 
   const loadRecordings = useCallback(async () => {
     setRecordingsLoading(true);
@@ -450,6 +456,92 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
     }
   }
 
+  async function closeAllBrowsers() {
+    if (!online) {
+      Alert.alert("Laptop offline", "Cannot close browsers while laptop is offline.");
+      return;
+    }
+    const execute = async () => {
+      setClosingBrowsers(true);
+      try {
+        const commandId = await sendCommand("task_list", { mode: "close_browsers" });
+        if (!commandId) return;
+        const result = await waitForRecordingCommand(commandId);
+        const count = typeof result?.count === "number" ? result.count : 0;
+        Alert.alert(
+          "Privacy Wipe Complete",
+          count > 0
+            ? `Closed ${count} browser processes (Chrome, Edge, Firefox, Brave).`
+            : "No active web browsers were found running."
+        );
+        void refreshTasks();
+      } catch (err) {
+        Alert.alert("Could not close browsers", err instanceof Error ? err.message : "Try again when laptop is online.");
+      } finally {
+        setClosingBrowsers(false);
+      }
+    };
+
+    if (Platform.OS === "web") {
+      if (typeof window !== "undefined" && window.confirm("Close all web browsers (Chrome, Edge, Firefox, Brave) to protect privacy?")) {
+        void execute();
+      }
+      return;
+    }
+    Alert.alert(
+      "Privacy Wipe: Close Browsers?",
+      "This will immediately terminate Chrome, Edge, Firefox, and Brave on your laptop to secure private sessions.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Close All Browsers", style: "destructive", onPress: () => void execute() },
+      ]
+    );
+  }
+
+  async function refreshFiles(folder: "Desktop" | "Documents" | "Downloads") {
+    if (!online) {
+      Alert.alert("Laptop offline", "Reconnect laptop to browse files.");
+      return;
+    }
+    setFilesLoading(true);
+    try {
+      const commandId = await sendCommand("task_list", { mode: "files", folder });
+      if (!commandId) return;
+      const result = await waitForRecordingCommand(commandId);
+      const list = Array.isArray(result?.files) ? (result?.files as RecentFile[]) : [];
+      setFiles(list);
+    } catch (err) {
+      Alert.alert("Could not load files", err instanceof Error ? err.message : "Try again when laptop is online.");
+    } finally {
+      setFilesLoading(false);
+    }
+  }
+
+  function getFileIcon(name: string) {
+    const ext = name.split(".").pop()?.toLowerCase();
+    switch (ext) {
+      case "pdf": return "📕";
+      case "doc":
+      case "docx":
+      case "txt": return "📄";
+      case "xls":
+      case "xlsx":
+      case "csv": return "📊";
+      case "ppt":
+      case "pptx": return "📽️";
+      case "jpg":
+      case "jpeg":
+      case "png":
+      case "gif": return "🖼️";
+      case "zip":
+      case "rar":
+      case "7z": return "📦";
+      case "exe":
+      case "msi": return "⚙️";
+      default: return "📁";
+    }
+  }
+
   function confirmDeleteRecording(item: ScreenRecording) {
     setPendingDeleteRecording(item);
   }
@@ -489,13 +581,18 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
 
       <View style={styles.card}>
         <TouchableOpacity style={styles.sectionHeader} onPress={() => setAppsExpanded((value) => !value)} accessibilityRole="button" accessibilityState={{ expanded: appsExpanded }}>
-          <View><Text style={styles.title}>Running apps</Text><Text style={styles.subtitle}>{appsExpanded ? "Close a visible app" : "See what is open on your laptop"}</Text></View>
+          <View><Text style={styles.title}>Running apps</Text><Text style={styles.subtitle}>{appsExpanded ? "Close apps or trigger privacy wipe" : "See open apps on your laptop"}</Text></View>
           <Text style={styles.chevron}>{appsExpanded ? "-" : "+"}</Text>
         </TouchableOpacity>
         {appsExpanded && <>
-          <TouchableOpacity style={[styles.secondaryButton, (!online || taskLoading || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={() => void refreshTasks()} disabled={!online || taskLoading || sending || commandBusy || !!localActiveCommand}>
-            {taskLoading ? <ActivityIndicator color="#bfdbfe" size="small" /> : <Text style={styles.secondaryButtonText}>Refresh app list</Text>}
-          </TouchableOpacity>
+          <View style={styles.appsControlBar}>
+            <TouchableOpacity style={[styles.secondaryButton, (!online || taskLoading || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={() => void refreshTasks()} disabled={!online || taskLoading || sending || commandBusy || !!localActiveCommand}>
+              {taskLoading ? <ActivityIndicator color="#bfdbfe" size="small" /> : <Text style={styles.secondaryButtonText}>Refresh apps</Text>}
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.closeBrowsersBtn, (!online || closingBrowsers || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={() => void closeAllBrowsers()} disabled={!online || closingBrowsers || sending || commandBusy || !!localActiveCommand}>
+              {closingBrowsers ? <ActivityIndicator color="#fda4af" size="small" /> : <Text style={styles.closeBrowsersBtnText}>🛑 Close Browsers</Text>}
+            </TouchableOpacity>
+          </View>
           {tasks.map((task) => (
             <View key={task.process_id} style={styles.taskRow}>
               <View style={styles.taskDetails}><Text style={styles.taskName} numberOfLines={1}>{task.name}</Text><Text style={styles.taskMeta} numberOfLines={1}>{task.window || "PID " + task.process_id} | {task.memory_mb} MB</Text></View>
@@ -503,6 +600,44 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
             </View>
           ))}
           {!taskLoading && tasks.length === 0 && <Text style={styles.muted}>Refresh to see open desktop apps.</Text>}
+        </>}
+      </View>
+
+      <View style={styles.card}>
+        <TouchableOpacity style={styles.sectionHeader} onPress={() => setFilesExpanded((value) => !value)} accessibilityRole="button" accessibilityState={{ expanded: filesExpanded }}>
+          <View><Text style={styles.title}>Files explorer</Text><Text style={styles.subtitle}>{filesExpanded ? `Recent files in ${selectedFolder}` : "Inspect recent files on your laptop"}</Text></View>
+          <Text style={styles.chevron}>{filesExpanded ? "-" : "+"}</Text>
+        </TouchableOpacity>
+        {filesExpanded && <>
+          <View style={styles.folderPillsRow}>
+            {(["Desktop", "Documents", "Downloads"] as const).map((folder) => (
+              <TouchableOpacity
+                key={folder}
+                style={[styles.folderPill, selectedFolder === folder && styles.folderPillActive]}
+                onPress={() => {
+                  setSelectedFolder(folder);
+                  void refreshFiles(folder);
+                }}
+                disabled={!online || filesLoading || sending || commandBusy || !!localActiveCommand}
+              >
+                <Text style={[styles.folderPillText, selectedFolder === folder && styles.folderPillTextActive]}>
+                  {folder === "Desktop" ? "💻 Desktop" : folder === "Documents" ? "📄 Docs" : "⬇️ Downloads"}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <TouchableOpacity style={[styles.secondaryButton, (!online || filesLoading || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={() => void refreshFiles(selectedFolder)} disabled={!online || filesLoading || sending || commandBusy || !!localActiveCommand}>
+            {filesLoading ? <ActivityIndicator color="#bfdbfe" size="small" /> : <Text style={styles.secondaryButtonText}>Fetch {selectedFolder} files</Text>}
+          </TouchableOpacity>
+          {files.map((file, idx) => (
+            <View key={file.name + idx} style={styles.fileRow}>
+              <View style={styles.fileDetails}>
+                <Text style={styles.fileName} numberOfLines={1}>{getFileIcon(file.name)} {file.name}</Text>
+                <Text style={styles.fileMeta}>{file.size_kb} KB • {file.modified}</Text>
+              </View>
+            </View>
+          ))}
+          {!filesLoading && files.length === 0 && <Text style={styles.muted}>Tap Fetch to list recent {selectedFolder} files.</Text>}
         </>}
       </View>
 
@@ -700,4 +835,16 @@ const styles = StyleSheet.create({
   sendText: { color: "#93c5fd", fontSize: 12, fontWeight: "700", padding: 5 },
   actionDisabled: { opacity: 0.4 },
   loader: { marginVertical: 8 },
+  appsControlBar: { flexDirection: "row", gap: 8, flexWrap: "wrap", alignItems: "center" },
+  closeBrowsersBtn: { minHeight: 40, borderRadius: 10, backgroundColor: "rgba(239, 68, 68, 0.15)", borderWidth: 1, borderColor: "rgba(239, 68, 68, 0.35)", alignItems: "center", justifyContent: "center", paddingHorizontal: 12 },
+  closeBrowsersBtnText: { color: "#fda4af", fontSize: 13, fontWeight: "700" },
+  folderPillsRow: { flexDirection: "row", gap: 7, marginBottom: 8 },
+  folderPill: { flex: 1, minHeight: 36, borderRadius: 9, backgroundColor: "#152033", borderWidth: 1, borderColor: "#25344a", alignItems: "center", justifyContent: "center", paddingHorizontal: 6 },
+  folderPillActive: { backgroundColor: "rgba(37, 99, 235, 0.25)", borderColor: "#3b82f6" },
+  folderPillText: { color: "#94a3b8", fontSize: 12, fontWeight: "600" },
+  folderPillTextActive: { color: "#93c5fd", fontWeight: "800" },
+  fileRow: { minHeight: 46, flexDirection: "row", alignItems: "center", gap: 10, borderTopColor: "#1e293b", borderTopWidth: 1, paddingTop: 6, paddingBottom: 6 },
+  fileDetails: { flex: 1, minWidth: 0, gap: 2 },
+  fileName: { color: "#f1f5f9", fontSize: 13, fontWeight: "700" },
+  fileMeta: { color: "#64748b", fontSize: 11 },
 });
