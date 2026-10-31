@@ -1052,6 +1052,16 @@ async function pollOnce() {
     let imageData = null;
     let commandResult = null;
 
+    let commandPayload = command.payload;
+    if (typeof commandPayload === "string") {
+      try {
+        commandPayload = JSON.parse(commandPayload);
+      } catch {}
+    }
+    if (!commandPayload || typeof commandPayload !== "object") {
+      commandPayload = {};
+    }
+
     if (action === "sleep") {
       // For sleep, we notify Supabase that it was completed BEFORE putting the machine into sleep,
       // because network adapters suspend immediately upon sleep.
@@ -1073,7 +1083,7 @@ async function pollOnce() {
       }
     } else if (action === "screenshot") {
       try {
-        const source = command.payload?.source || "screen";
+        const source = commandPayload.source || "screen";
         if (source === "webcam") {
           console.log("Capturing intruder webcam photo...");
           imageData = await captureWebcam();
@@ -1115,11 +1125,11 @@ async function pollOnce() {
       commandResult = { locked: wasLocked, screenshot_captured: Boolean(imageData) };
     } else if (action === "task_list") {
       try {
-        if (command.payload?.mode === "files") {
-          const folder = String(command.payload?.folder || "Desktop");
+        if (commandPayload.mode === "files") {
+          const folder = String(commandPayload.folder || "Downloads");
           const files = await getFolderFiles(folder);
           commandResult = { mode: "files", folder, files };
-        } else if (command.payload?.mode === "close_browsers") {
+        } else if (commandPayload.mode === "close_browsers") {
           const closeResult = await closeWebBrowsers();
           commandResult = { mode: "close_browsers", ...closeResult };
         } else {

@@ -63,9 +63,10 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
   const [appsExpanded, setAppsExpanded] = useState(false);
   const [notesExpanded, setNotesExpanded] = useState(false);
   const [filesExpanded, setFilesExpanded] = useState(false);
-  const [selectedFolder, setSelectedFolder] = useState<"Desktop" | "Documents" | "Downloads">("Desktop");
+  const [selectedFolder, setSelectedFolder] = useState<"Desktop" | "Documents" | "Downloads">("Downloads");
   const [files, setFiles] = useState<RecentFile[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
+  const [hasFetched, setHasFetched] = useState(false);
   const [closingBrowsers, setClosingBrowsers] = useState(false);
 
   const loadRecordings = useCallback(async () => {
@@ -467,6 +468,7 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
         const commandId = await sendCommand("task_list", { mode: "close_browsers" });
         if (!commandId) return;
         const result = await waitForRecordingCommand(commandId);
+        setLocalActiveCommand(null);
         const count = typeof result?.count === "number" ? result.count : 0;
         Alert.alert(
           "Privacy Wipe Complete",
@@ -476,6 +478,7 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
         );
         void refreshTasks();
       } catch (err) {
+        setLocalActiveCommand(null);
         Alert.alert("Could not close browsers", err instanceof Error ? err.message : "Try again when laptop is online.");
       } finally {
         setClosingBrowsers(false);
@@ -504,13 +507,16 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
       return;
     }
     setFilesLoading(true);
+    setHasFetched(true);
     try {
       const commandId = await sendCommand("task_list", { mode: "files", folder });
       if (!commandId) return;
       const result = await waitForRecordingCommand(commandId);
+      setLocalActiveCommand(null);
       const list = Array.isArray(result?.files) ? (result?.files as RecentFile[]) : [];
       setFiles(list);
     } catch (err) {
+      setLocalActiveCommand(null);
       Alert.alert("Could not load files", err instanceof Error ? err.message : "Try again when laptop is online.");
     } finally {
       setFilesLoading(false);
@@ -637,7 +643,11 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
               </View>
             </View>
           ))}
-          {!filesLoading && files.length === 0 && <Text style={styles.muted}>Tap Fetch to list recent {selectedFolder} files.</Text>}
+          {!filesLoading && files.length === 0 && (
+            <Text style={styles.muted}>
+              {hasFetched ? `No loose files found in ${selectedFolder}.` : `Tap Fetch to list recent ${selectedFolder} files.`}
+            </Text>
+          )}
         </>}
       </View>
 

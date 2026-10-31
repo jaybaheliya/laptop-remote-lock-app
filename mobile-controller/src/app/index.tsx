@@ -1661,40 +1661,54 @@ export default function HomeScreen() {
 
                 {/* DESKTOP SCREEN MONITOR CARD */}
                 <View style={styles.screenshotCard}>
-                  <View style={styles.screenshotHeader}>
-                    <View style={styles.screenshotHeaderTitleRow}>
-                      <Text style={styles.screenshotCardTitle}>📸 SURVEILLANCE</Text>
-                      <View style={styles.liveIndicator}>
-                        <View style={styles.liveIndicatorDot} />
-                        <Text style={styles.liveIndicatorText}>ANTI-THEFT</Text>
-                      </View>
+                  <View style={styles.surveillanceTopBar}>
+                    <Text style={styles.screenshotCardTitle}>📸 VISUAL SURVEILLANCE</Text>
+                    <View style={styles.liveIndicator}>
+                      <View style={styles.liveIndicatorDot} />
+                      <Text style={styles.liveIndicatorText}>ANTI-THEFT</Text>
                     </View>
-                    <View style={styles.surveillanceActionGroup}>
-                      <TouchableOpacity
-                        style={[
-                          styles.refreshScreenshotBtn,
-                          actionSubmitting === "screenshot" && styles.heroLockBtnDisabled,
-                        ]}
-                        onPress={() => void executeRemoteAction("screenshot", { source: "screen" })}
-                        disabled={actionSubmitting !== null || isCommandActive}
-                      >
-                        <Text style={styles.refreshScreenshotBtnText}>
-                          {actionSubmitting === "screenshot" ? "Capturing..." : "🖥️ Screen"}
-                        </Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[
-                          styles.webcamScreenshotBtn,
-                          actionSubmitting === "webcam" && styles.heroLockBtnDisabled,
-                        ]}
-                        onPress={() => void executeRemoteAction("screenshot", { source: "webcam" })}
-                        disabled={actionSubmitting !== null || isCommandActive}
-                      >
-                        <Text style={styles.webcamScreenshotBtnText}>
-                          {actionSubmitting === "webcam" ? "Snapping..." : "📸 Intruder Cam"}
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
+                  </View>
+
+                  <View style={styles.surveillanceCtaBar}>
+                    <TouchableOpacity
+                      style={[
+                        styles.surveillanceCtaBtn,
+                        styles.surveillanceScreenBtn,
+                        (actionSubmitting !== null || isCommandActive) && styles.heroLockBtnDisabled,
+                      ]}
+                      onPress={() => void executeRemoteAction("screenshot", { source: "screen" })}
+                      disabled={actionSubmitting !== null || isCommandActive}
+                      activeOpacity={0.8}
+                    >
+                      {actionSubmitting === "screenshot" ? (
+                        <View style={styles.ctaLoadingRow}>
+                          <ActivityIndicator size="small" color="#38bdf8" />
+                          <Text style={styles.surveillanceScreenBtnText}>Capturing...</Text>
+                        </View>
+                      ) : (
+                        <Text style={styles.surveillanceScreenBtnText}>🖥️ Capture Screen</Text>
+                      )}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.surveillanceCtaBtn,
+                        styles.surveillanceWebcamBtn,
+                        (actionSubmitting !== null || isCommandActive) && styles.heroLockBtnDisabled,
+                      ]}
+                      onPress={() => void executeRemoteAction("screenshot", { source: "webcam" })}
+                      disabled={actionSubmitting !== null || isCommandActive}
+                      activeOpacity={0.8}
+                    >
+                      {actionSubmitting === "webcam" ? (
+                        <View style={styles.ctaLoadingRow}>
+                          <ActivityIndicator size="small" color="#f87171" />
+                          <Text style={styles.surveillanceWebcamBtnText}>Snapping...</Text>
+                        </View>
+                      ) : (
+                        <Text style={styles.surveillanceWebcamBtnText}>📸 Intruder Cam</Text>
+                      )}
+                    </TouchableOpacity>
                   </View>
 
                   {latestScreenshot ? (
@@ -1702,7 +1716,7 @@ export default function HomeScreen() {
                       <TouchableOpacity
                         onPress={() => setScreenshotModalVisible(true)}
                         activeOpacity={0.9}
-                        style={[styles.screenshotImageWrapper, { height: windowWidth < 600 ? Math.max(100, windowWidth * 0.32) : 160 }]}
+                        style={[styles.screenshotImageWrapper, { height: windowWidth < 600 ? Math.max(140, windowWidth * 0.45) : 180 }]}
                       >
                         <Image
                           source={{ uri: latestScreenshot.image_data }}
@@ -1719,10 +1733,10 @@ export default function HomeScreen() {
                     </View>
                   ) : (
                     <View style={styles.noScreenshotBox}>
-                      <Text style={styles.noScreenshotEmoji}>🖥️</Text>
-                      <Text style={styles.noScreenshotText}>No desktop snapshot captured yet.</Text>
+                      <Text style={styles.noScreenshotEmoji}>📸</Text>
+                      <Text style={styles.noScreenshotText}>No visual snapshot captured yet.</Text>
                       <Text style={styles.noScreenshotSub}>
-                        Tap &quot;Capture Now&quot; to view what is currently on your laptop screen.
+                        Tap &quot;Capture Screen&quot; to inspect desktop, or &quot;Intruder Cam&quot; for webcam photo.
                       </Text>
                     </View>
                   )}
@@ -3328,26 +3342,54 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: "#38bdf8",
   },
-  surveillanceActionGroup: {
+  surveillanceTopBar: {
     flexDirection: "row",
-    gap: 6,
-    flexWrap: "wrap",
-    justifyContent: "flex-end",
+    justifyContent: "space-between",
+    alignItems: "center",
+    width: "100%",
+    marginBottom: 8,
   },
-  webcamScreenshotBtn: {
-    backgroundColor: "rgba(239, 68, 68, 0.15)",
+  surveillanceCtaBar: {
+    flexDirection: "row",
+    gap: 8,
+    width: "100%",
+    marginBottom: 12,
+  },
+  surveillanceCtaBtn: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+  },
+  surveillanceScreenBtn: {
+    backgroundColor: "rgba(56, 189, 248, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.35)",
+  },
+  surveillanceScreenBtnText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#38bdf8",
+    textAlign: "center",
+  },
+  surveillanceWebcamBtn: {
+    backgroundColor: "rgba(239, 68, 68, 0.14)",
     borderWidth: 1,
     borderColor: "rgba(239, 68, 68, 0.4)",
-    borderRadius: 8,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    flexShrink: 0,
-    alignSelf: "center",
   },
-  webcamScreenshotBtnText: {
-    fontSize: 11,
-    fontWeight: "700",
+  surveillanceWebcamBtnText: {
+    fontSize: 12,
+    fontWeight: "800",
     color: "#f87171",
+    textAlign: "center",
+  },
+  ctaLoadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
   },
   chargerDisconnectBanner: {
     backgroundColor: "rgba(239, 68, 68, 0.12)",
