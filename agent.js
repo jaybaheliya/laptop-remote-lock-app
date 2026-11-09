@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const net = require("node:net");
-const { spawn } = require("node:child_process");
+const { spawn, exec } = require("node:child_process");
 const crypto = require("node:crypto");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
@@ -330,6 +330,8 @@ function getSystemTelemetry() {
             disk_total_gb: Number.isFinite(value.disk_total_gb) ? value.disk_total_gb : null,
             memory_used_gb: Number.isFinite(value.memory_used_gb) ? value.memory_used_gb : null,
             memory_total_gb: Number.isFinite(value.memory_total_gb) ? value.memory_total_gb : null,
+            location: cachedLocation?.geo ? { ...cachedLocation.geo, wifi: cachedLocation.wifi } : null,
+            last_failed_login: lastDetectedFailedLoginIso,
           };
           lastTelemetryFetchTime = now;
         } catch {}
@@ -823,6 +825,240 @@ function unlockOrWakeWindows() {
   });
 }
 
+let cachedLocation = null;
+let lastLocationFetchTime = 0;
+
+async function getDeviceLocation() {
+  const now = Date.now();
+  if (cachedLocation && now - lastLocationFetchTime < 60000) {
+    return cachedLocation;
+  }
+
+  // 1. Query Wi-Fi info via netsh
+  let wifiInfo = null;
+  try {
+    const wlanOutput = await new Promise((resolve) => {
+      exec("netsh wlan show interfaces", { timeout: 3000 }, (err, stdout) => {
+        resolve(stdout || "");
+      });
+    });
+    const ssidMatch = wlanOutput.match(/^\s*SSID\s*:\s*(.+)$/m);
+    const signalMatch = wlanOutput.match(/^\s*Signal\s*:\s*(\d+)%/m);
+    const bssidMatch = wlanOutput.match(/^\s*BSSID\s*:\s*([0-9a-f:]{17})/im);
+    if (ssidMatch && ssidMatch[1] && !ssidMatch[0].toLowerCase().includes("bssid")) {
+      wifiInfo = {
+        ssid: ssidMatch[1].trim(),
+        signal: signalMatch ? parseInt(signalMatch[1], 10) : null,
+        bssid: bssidMatch ? bssidMatch[1].trim() : null,
+      };
+    }
+  } catch {}
+
+  // 2. Query IP Geolocation API with timeout
+  let geo = null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    const res = await fetch("https://ipwho.is/", { signal: controller.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.success !== false) {
+        geo = {
+          ip: data.ip || null,
+          city: data.city || null,
+          region: data.region || null,
+          country: data.country || null,
+          country_code: data.country_code || null,
+          latitude: typeof data.latitude === "number" ? data.latitude : null,
+          longitude: typeof data.longitude === "number" ? data.longitude : null,
+          isp: data.connection?.isp || data.isp || null,
+        };
+      }
+    }
+  } catch {
+    // Fallback
+    try {
+      const controller2 = new AbortController();
+      const timer2 = setTimeout(() => controller2.abort(), 3000);
+      const res2 = await fetch("http://ip-api.com/json", { signal: controller2.signal });
+      clearTimeout(timer2);
+      if (res2.ok) {
+        const data2 = await res2.json();
+        if (data2 && data2.status === "success") {
+          geo = {
+            ip: data2.query || null,
+            city: data2.city || null,
+            region: data2.regionName || null,
+            country: data2.country || null,
+            country_code: data2.countryCode || null,
+            latitude: typeof data2.lat === "number" ? data2.lat : null,
+            longitude: typeof data2.lon === "number" ? data2.lon : null,
+            isp: data2.isp || null,
+          };
+        }
+      }
+    } catch {}
+  }
+
+  cachedLocation = {
+    geo,
+    wifi: wifiInfo,
+    updated_at: new Date().toISOString(),
+  };
+  lastLocationFetchTime = now;
+  return cachedLocation;
+}
+
+function controlMediaOrVolume(subAction, value) {
+  return new Promise((resolve) => {
+    let scriptAction = String(subAction || "play_pause").toLowerCase().trim();
+    if (typeof value === "number" && !isNaN(value)) {
+      if (value <= 0) scriptAction = "set_0";
+      else if (value <= 35) scriptAction = "set_25";
+      else if (value <= 60) scriptAction = "set_50";
+      else if (value <= 85) scriptAction = "set_75";
+      else scriptAction = "set_100";
+    }
+
+    const psCode = `
+      $ErrorActionPreference = 'SilentlyContinue'
+      $csharp = @"
+      using System;
+      using System.Runtime.InteropServices;
+      public class WinAudioHelper {
+          [DllImport("user32.dll")]
+          public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+          public const byte VK_VOLUME_MUTE = 0xAD;
+          public const byte VK_VOLUME_DOWN = 0xAE;
+          public const byte VK_VOLUME_UP = 0xAF;
+          public const byte VK_MEDIA_NEXT_TRACK = 0xB0;
+          public const byte VK_MEDIA_PREV_TRACK = 0xB1;
+          public const byte VK_MEDIA_PLAY_PAUSE = 0xB3;
+          public static void PressKey(byte vk) {
+              keybd_event(vk, 0, 0, UIntPtr.Zero);
+              keybd_event(vk, 0, 2, UIntPtr.Zero);
+          }
+          public static void SetVolume(int targetPercent) {
+              for (int i = 0; i < 50; i++) PressKey(VK_VOLUME_DOWN);
+              int steps = targetPercent / 2;
+              for (int i = 0; i < steps; i++) PressKey(VK_VOLUME_UP);
+          }
+      }
+"@
+      Add-Type -TypeDefinition $csharp -ErrorAction SilentlyContinue
+      switch ('${scriptAction}') {
+          'play_pause' { [WinAudioHelper]::PressKey([WinAudioHelper]::VK_MEDIA_PLAY_PAUSE) }
+          'next'       { [WinAudioHelper]::PressKey([WinAudioHelper]::VK_MEDIA_NEXT_TRACK) }
+          'prev'       { [WinAudioHelper]::PressKey([WinAudioHelper]::VK_MEDIA_PREV_TRACK) }
+          'mute'       { [WinAudioHelper]::PressKey([WinAudioHelper]::VK_VOLUME_MUTE) }
+          'vol_up'     { for ($i=0;$i -lt 4;$i++) { [WinAudioHelper]::PressKey([WinAudioHelper]::VK_VOLUME_UP) } }
+          'vol_down'   { for ($i=0;$i -lt 4;$i++) { [WinAudioHelper]::PressKey([WinAudioHelper]::VK_VOLUME_DOWN) } }
+          'set_0'      { [WinAudioHelper]::SetVolume(0) }
+          'set_25'     { [WinAudioHelper]::SetVolume(25) }
+          'set_50'     { [WinAudioHelper]::SetVolume(50) }
+          'set_75'     { [WinAudioHelper]::SetVolume(75) }
+          'set_100'    { [WinAudioHelper]::SetVolume(100) }
+      }
+      [PSCustomObject]@{ success = $true; action = '${scriptAction}' } | ConvertTo-Json -Compress
+    `;
+
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCode], {
+      shell: false,
+      windowsHide: true,
+    });
+
+    let stdout = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.once("close", (code) => {
+      if (code === 0 && stdout.trim()) {
+        try {
+          const res = JSON.parse(stdout.trim());
+          resolve(res);
+          return;
+        } catch {}
+      }
+      resolve({ success: true, action: scriptAction });
+    });
+    child.once("error", (err) => resolve({ success: false, error: err.message }));
+  });
+}
+
+function openRemoteUrl(targetUrl) {
+  return new Promise((resolve, reject) => {
+    if (!targetUrl || typeof targetUrl !== "string") {
+      return reject(new Error("Missing URL parameter"));
+    }
+    const trimmed = targetUrl.trim();
+    if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+      return reject(new Error("Invalid URL protocol. Only http:// and https:// URLs are allowed."));
+    }
+    const safeUrl = trimmed.replace(/'/g, "''");
+    const script = `Start-Process -FilePath '${safeUrl}'`;
+
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      shell: false,
+      windowsHide: true,
+    });
+
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolve({ success: true, url: trimmed });
+      } else {
+        reject(new Error(`Failed to open URL on laptop (exit code ${code})`));
+      }
+    });
+    child.once("error", reject);
+  });
+}
+
+let lastFailedLoginBaseline = null;
+let lastIntruderSnapTimestamp = 0;
+let lastDetectedFailedLoginIso = null;
+
+async function checkFailedLogins() {
+  const script = `
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+      $events = Get-WinEvent -FilterHashtable @{LogName='Security';Id=4625} -MaxEvents 1 -ErrorAction Stop
+      if ($events) { $events[0].TimeCreated.ToString('o') }
+    } catch {}
+  `;
+  try {
+    const output = await runPowerShell(script, 4000);
+    const timeStr = output.trim();
+    if (timeStr && !isNaN(Date.parse(timeStr))) {
+      const eventTime = new Date(timeStr).getTime();
+      if (lastFailedLoginBaseline === null) {
+        lastFailedLoginBaseline = eventTime;
+      } else if (eventTime > lastFailedLoginBaseline) {
+        lastFailedLoginBaseline = eventTime;
+        lastDetectedFailedLoginIso = timeStr;
+        const now = Date.now();
+        if (now - lastIntruderSnapTimestamp > 60000) {
+          lastIntruderSnapTimestamp = now;
+          console.warn(`[INTRUDER ALERT] Failed Windows login detected at ${timeStr}! Auto-capturing intruder photo...`);
+          try {
+            const snap = await captureWebcam();
+            try {
+              const snapDir = path.join(path.dirname(PID_FILE), "intruder_snaps");
+              if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+              const snapFile = path.join(snapDir, `intruder_${Date.now()}.jpg`);
+              const base64Data = snap.replace(/^data:image\/\w+;base64,/, "");
+              fs.writeFileSync(snapFile, Buffer.from(base64Data, "base64"));
+              console.log(`[INTRUDER ALERT] Snapshot saved locally to: ${snapFile}`);
+            } catch (saveErr) {
+              console.error("Local intruder snap save failed:", saveErr.message);
+            }
+          } catch (camErr) {
+            console.error("Intruder auto-webcam capture failed:", camErr.message);
+          }
+        }
+      }
+    }
+  } catch {}
+}
+
 const ALLOWED_ACTIONS = ["lock", "sleep", "shutdown", "screenshot", "unlock", "panic", "display_message", "task_list", "end_task", "refresh_status", "save_note", "screen_record", "rename_recording", "delete_recording"];
 
 let screenRecordingSession = null;
@@ -1108,6 +1344,7 @@ async function pollOnce() {
 
   try {
     const battery = await getBatteryStatus();
+    checkFailedLogins().catch(() => {});
 
     // Security alert: Detect when AC charger is unplugged while away
     if (battery && typeof battery.power_online === "boolean") {
@@ -1251,6 +1488,18 @@ async function pollOnce() {
         } else if (commandPayload.mode === "close_browsers") {
           const closeResult = await closeWebBrowsers();
           commandResult = { mode: "close_browsers", ...closeResult };
+        } else if (commandPayload.mode === "locate") {
+          const location = await getDeviceLocation();
+          commandResult = { mode: "locate", location };
+        } else if (commandPayload.mode === "media") {
+          const subAction = String(commandPayload.sub_action || "play_pause");
+          const value = typeof commandPayload.value === "number" ? commandPayload.value : undefined;
+          const mediaResult = await controlMediaOrVolume(subAction, value);
+          commandResult = { mode: "media", sub_action: subAction, ...mediaResult };
+        } else if (commandPayload.mode === "open_url") {
+          const targetUrl = String(commandPayload.url || "");
+          const openResult = await openRemoteUrl(targetUrl);
+          commandResult = { mode: "open_url", url: targetUrl, ...openResult };
         } else {
           commandResult = { tasks: await getRunningTasks() };
         }
