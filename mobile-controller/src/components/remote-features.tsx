@@ -5,6 +5,7 @@ import {
   Linking,
   Modal,
   Platform,
+  ScrollView,
   Share,
   StyleSheet,
   Switch,
@@ -526,6 +527,40 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
     }
   }
 
+  async function fetchFileBase64(file: RecentFile): Promise<string> {
+    const commandId = await sendCommand("task_list", { mode: "get_file", folder: selectedFolder, file_name: file.name });
+    if (!commandId) throw new Error("Could not send file request to laptop.");
+
+    const result = await waitForRecordingCommand(commandId);
+    setLocalActiveCommand(null);
+
+    // Direct payload from command result if present (for small files)
+    if (typeof result?.base64 === "string" && result.base64.length > 0) {
+      return result.base64;
+    }
+
+    // High-capacity payload channel via screenshots table
+    const targetPrefix = `data:application/octet-stream;name=${encodeURIComponent(file.name)};base64,`;
+    const { data: ssRow, error: ssErr } = await supabase
+      .from("screenshots")
+      .select("id, image_data")
+      .eq("device_id", deviceId)
+      .eq("user_id", userId)
+      .like("image_data", `${targetPrefix}%`)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (ssErr || !ssRow?.image_data) {
+      throw new Error("Laptop processed the file, but file data transfer could not complete.");
+    }
+
+    // Clean up temporary transfer entry asynchronously
+    void supabase.from("screenshots").delete().eq("id", ssRow.id);
+
+    return ssRow.image_data.slice(targetPrefix.length);
+  }
+
   async function handleSaveFile(file: RecentFile) {
     if (!online) {
       Alert.alert("Laptop offline", "Cannot download files while laptop is offline.");
@@ -533,22 +568,11 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
     }
     setDownloadingFileName(file.name);
     try {
-      const commandId = await sendCommand("task_list", { mode: "get_file", folder: selectedFolder, file_name: file.name });
-      if (!commandId) return;
-      const result = await waitForRecordingCommand(commandId);
-      setLocalActiveCommand(null);
-
-      const base64 = typeof result?.base64 === "string" ? result.base64 : null;
-      if (!base64) throw new Error("No file content received from laptop.");
+      const base64 = await fetchFileBase64(file);
 
       if (Platform.OS === "web" && typeof window !== "undefined") {
-        const byteCharacters = atob(base64);
-        const byteNumbers = new Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-          byteNumbers[i] = byteCharacters.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
-        const blob = new Blob([byteArray]);
+        const res = await fetch(`data:application/octet-stream;base64,${base64}`);
+        const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
@@ -556,8 +580,8 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        Alert.alert("File Downloaded", `Saved "${file.name}" to your device.`);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        Alert.alert("File Downloaded", `Saved "${file.name}" to your device downloads.`);
       } else {
         await Share.share({
           title: file.name,
@@ -580,43 +604,36 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
     }
     setSharingFileName(file.name);
     try {
-      const commandId = await sendCommand("task_list", { mode: "get_file", folder: selectedFolder, file_name: file.name });
-      if (!commandId) return;
-      const result = await waitForRecordingCommand(commandId);
-      setLocalActiveCommand(null);
-
-      const base64 = typeof result?.base64 === "string" ? result.base64 : null;
-      if (!base64) throw new Error("No file content received from laptop.");
+      const base64 = await fetchFileBase64(file);
 
       if (Platform.OS === "web" && typeof window !== "undefined") {
-        const byteCharacters = atob(base64);
-        const byteNumbers = new Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-          byteNumbers[i] = byteCharacters.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
-        const blob = new Blob([byteArray]);
+        const res = await fetch(`data:application/octet-stream;base64,${base64}`);
+        const blob = await res.blob();
 
-        if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+        let shared = false;
+        if (typeof navigator !== "undefined" && typeof navigator.share === "function" && typeof File !== "undefined") {
           try {
-            const webFile = new File([blob], file.name);
+            const webFile = new File([blob], file.name, { type: blob.type || "application/octet-stream" });
             if (navigator.canShare && navigator.canShare({ files: [webFile] })) {
               await navigator.share({ files: [webFile], title: file.name });
-              return;
+              shared = true;
             }
           } catch {
-            // fallback to download
+            // Dismissed or unsupported, fall through to fallback
           }
         }
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = file.name;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        Alert.alert("File Ready", `Downloaded "${file.name}" to share.`);
+
+        if (!shared) {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = file.name;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 2000);
+          Alert.alert("File Ready", `Prepared "${file.name}" and downloaded to your device.`);
+        }
       } else {
         await Share.share({
           title: file.name,
@@ -746,12 +763,23 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
               {closingBrowsers ? <ActivityIndicator color="#fda4af" size="small" /> : <Text style={styles.closeBrowsersBtnText}>🛑 Close Browsers</Text>}
             </TouchableOpacity>
           </View>
-          {tasks.map((task) => (
-            <View key={task.process_id} style={styles.taskRow}>
-              <View style={styles.taskDetails}><Text style={styles.taskName} numberOfLines={1}>{task.name}</Text><Text style={styles.taskMeta} numberOfLines={1}>{task.window || "PID " + task.process_id} | {task.memory_mb} MB</Text></View>
-              <TouchableOpacity style={styles.endButton} onPress={() => confirmEndTask(task)} disabled={!online || sending || commandBusy || !!localActiveCommand}><Text style={styles.endButtonText}>End</Text></TouchableOpacity>
-            </View>
-          ))}
+          {tasks.length > 5 ? (
+            <ScrollView style={styles.scrollContainerTasks} nestedScrollEnabled showsVerticalScrollIndicator>
+              {tasks.map((task) => (
+                <View key={task.process_id} style={styles.taskRow}>
+                  <View style={styles.taskDetails}><Text style={styles.taskName} numberOfLines={1}>{task.name}</Text><Text style={styles.taskMeta} numberOfLines={1}>{task.window || "PID " + task.process_id} | {task.memory_mb} MB</Text></View>
+                  <TouchableOpacity style={styles.endButton} onPress={() => confirmEndTask(task)} disabled={!online || sending || commandBusy || !!localActiveCommand}><Text style={styles.endButtonText}>End</Text></TouchableOpacity>
+                </View>
+              ))}
+            </ScrollView>
+          ) : (
+            tasks.map((task) => (
+              <View key={task.process_id} style={styles.taskRow}>
+                <View style={styles.taskDetails}><Text style={styles.taskName} numberOfLines={1}>{task.name}</Text><Text style={styles.taskMeta} numberOfLines={1}>{task.window || "PID " + task.process_id} | {task.memory_mb} MB</Text></View>
+                <TouchableOpacity style={styles.endButton} onPress={() => confirmEndTask(task)} disabled={!online || sending || commandBusy || !!localActiveCommand}><Text style={styles.endButtonText}>End</Text></TouchableOpacity>
+              </View>
+            ))
+          )}
           {!taskLoading && tasks.length === 0 && <Text style={styles.muted}>Refresh to see open desktop apps.</Text>}
         </>}
       </View>
@@ -782,60 +810,70 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           <TouchableOpacity style={[styles.secondaryButton, (!online || filesLoading || sending || commandBusy || !!localActiveCommand) && styles.disabled]} onPress={() => void refreshFiles(selectedFolder)} disabled={!online || filesLoading || sending || commandBusy || !!localActiveCommand}>
             {filesLoading ? <ActivityIndicator color="#bfdbfe" size="small" /> : <Text style={styles.secondaryButtonText}>Fetch {selectedFolder} files</Text>}
           </TouchableOpacity>
-          {files.map((file, idx) => {
-            const isDownloading = downloadingFileName === file.name;
-            const isSharing = sharingFileName === file.name;
-            const isDeleting = deletingFileName === file.name;
-            const isItemBusy = isDownloading || isSharing || isDeleting || !online || filesLoading || sending || commandBusy || !!localActiveCommand;
+          {(() => {
+            const fileCards = files.map((file, idx) => {
+              const isDownloading = downloadingFileName === file.name;
+              const isSharing = sharingFileName === file.name;
+              const isDeleting = deletingFileName === file.name;
+              const isItemBusy = isDownloading || isSharing || isDeleting || !online || filesLoading || sending || commandBusy || !!localActiveCommand;
 
-            return (
-              <View key={file.name + idx} style={styles.fileCard}>
-                <View style={styles.fileHeaderRow}>
-                  <View style={styles.fileDetails}>
-                    <Text style={styles.fileName} numberOfLines={1}>{getFileIcon(file.name)} {file.name}</Text>
-                    <Text style={styles.fileMeta}>{file.size_kb} KB • {file.modified}</Text>
+              return (
+                <View key={file.name + idx} style={styles.fileCard}>
+                  <View style={styles.fileHeaderRow}>
+                    <View style={styles.fileDetails}>
+                      <Text style={styles.fileName} numberOfLines={1}>{getFileIcon(file.name)} {file.name}</Text>
+                      <Text style={styles.fileMeta}>{file.size_kb} KB • {file.modified}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.fileCtaRow}>
+                    <TouchableOpacity
+                      style={[styles.fileCtaBtn, styles.fileCtaSave, isItemBusy && styles.disabled]}
+                      onPress={() => void handleSaveFile(file)}
+                      disabled={isItemBusy}
+                    >
+                      {isDownloading ? (
+                        <ActivityIndicator size="small" color="#38bdf8" />
+                      ) : (
+                        <Text style={styles.fileCtaSaveText}>💾 Save</Text>
+                      )}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.fileCtaBtn, styles.fileCtaShare, isItemBusy && styles.disabled]}
+                      onPress={() => void handleShareFile(file)}
+                      disabled={isItemBusy}
+                    >
+                      {isSharing ? (
+                        <ActivityIndicator size="small" color="#93c5fd" />
+                      ) : (
+                        <Text style={styles.fileCtaShareText}>🔗 Share</Text>
+                      )}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.fileCtaBtn, styles.fileCtaDelete, isItemBusy && styles.disabled]}
+                      onPress={() => confirmDeleteFile(file)}
+                      disabled={isItemBusy}
+                    >
+                      {isDeleting ? (
+                        <ActivityIndicator size="small" color="#fda4af" />
+                      ) : (
+                        <Text style={styles.fileCtaDeleteText}>🗑️ Delete</Text>
+                      )}
+                    </TouchableOpacity>
                   </View>
                 </View>
-                <View style={styles.fileCtaRow}>
-                  <TouchableOpacity
-                    style={[styles.fileCtaBtn, styles.fileCtaSave, isItemBusy && styles.disabled]}
-                    onPress={() => void handleSaveFile(file)}
-                    disabled={isItemBusy}
-                  >
-                    {isDownloading ? (
-                      <ActivityIndicator size="small" color="#38bdf8" />
-                    ) : (
-                      <Text style={styles.fileCtaSaveText}>💾 Save</Text>
-                    )}
-                  </TouchableOpacity>
+              );
+            });
 
-                  <TouchableOpacity
-                    style={[styles.fileCtaBtn, styles.fileCtaShare, isItemBusy && styles.disabled]}
-                    onPress={() => void handleShareFile(file)}
-                    disabled={isItemBusy}
-                  >
-                    {isSharing ? (
-                      <ActivityIndicator size="small" color="#93c5fd" />
-                    ) : (
-                      <Text style={styles.fileCtaShareText}>🔗 Share</Text>
-                    )}
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[styles.fileCtaBtn, styles.fileCtaDelete, isItemBusy && styles.disabled]}
-                    onPress={() => confirmDeleteFile(file)}
-                    disabled={isItemBusy}
-                  >
-                    {isDeleting ? (
-                      <ActivityIndicator size="small" color="#fda4af" />
-                    ) : (
-                      <Text style={styles.fileCtaDeleteText}>🗑️ Delete</Text>
-                    )}
-                  </TouchableOpacity>
-                </View>
-              </View>
+            return files.length > 5 ? (
+              <ScrollView style={styles.scrollContainerFiles} nestedScrollEnabled showsVerticalScrollIndicator>
+                {fileCards}
+              </ScrollView>
+            ) : (
+              fileCards
             );
-          })}
+          })()}
           {!filesLoading && files.length === 0 && (
             <Text style={styles.muted}>
               {hasFetched ? `No loose files found in ${selectedFolder}.` : `Tap Fetch to list recent ${selectedFolder} files.`}
@@ -868,43 +906,53 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           <Text style={styles.secondaryButtonText}>{recordingActionLoading ? "Checking..." : "Check Windows recording status"}</Text>
         </TouchableOpacity>
         <View style={styles.recordingListHeading}><Text style={styles.infoLabel}>Recent clips</Text><TouchableOpacity onPress={() => void loadRecordings()} disabled={recordingsLoading}><Text style={styles.sendText}>{recordingsLoading ? "Loading" : "Refresh"}</Text></TouchableOpacity></View>
-        {recordings.map((item) => {
-          const isRenaming = renamingRecordingId === item.id;
-          const isDeleting = deletingRecordingId === item.id;
-          const phoneActionDisabled = sending || commandBusy || !!localActiveCommand || isDeleting || deletingRecordingId !== null;
-          const actionDisabled = !online || phoneActionDisabled || recordingActionLoading;
-          return (
-            <View key={item.id} style={styles.recordingCard}>
-              <View style={styles.recordingMainRow}>
-                <View style={styles.recordingThumb} accessibilityLabel="MP4 video">
-                  <Text style={styles.recordingThumbPlay}>▶</Text>
-                  <Text style={styles.recordingThumbLabel}>MP4</Text>
+        {(() => {
+          const recordingCards = recordings.map((item) => {
+            const isRenaming = renamingRecordingId === item.id;
+            const isDeleting = deletingRecordingId === item.id;
+            const phoneActionDisabled = sending || commandBusy || !!localActiveCommand || isDeleting || deletingRecordingId !== null;
+            const actionDisabled = !online || phoneActionDisabled || recordingActionLoading;
+            return (
+              <View key={item.id} style={styles.recordingCard}>
+                <View style={styles.recordingMainRow}>
+                  <View style={styles.recordingThumb} accessibilityLabel="MP4 video">
+                    <Text style={styles.recordingThumbPlay}>▶</Text>
+                    <Text style={styles.recordingThumbLabel}>MP4</Text>
+                  </View>
+                  <View style={styles.recordingDetails}>
+                    <Text style={styles.recordingFileName} numberOfLines={1}>{item.file_name.replace(/\.mp4$/i, "")}</Text>
+                    <Text style={styles.recordingMeta}>{item.duration_seconds ? `${item.duration_seconds}s · ` : ""}{item.storage_path ? "Laptop + phone" : "Laptop only"}</Text>
+                  </View>
                 </View>
-                <View style={styles.recordingDetails}>
-                  <Text style={styles.recordingFileName} numberOfLines={1}>{item.file_name.replace(/\.mp4$/i, "")}</Text>
-                  <Text style={styles.recordingMeta}>{item.duration_seconds ? `${item.duration_seconds}s · ` : ""}{item.storage_path ? "Laptop + phone" : "Laptop only"}</Text>
+                {isRenaming && <TextInput style={styles.renameInput} value={renamingRecordingName} onChangeText={setRenamingRecordingName} placeholder="Video name" placeholderTextColor="#8090a5" maxLength={80} returnKeyType="done" onSubmitEditing={() => void renameRecording(item)} autoFocus />}
+                {!isRenaming && item.storage_path && <View style={styles.recordingCtaRow}>
+                  <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaPrimary]} onPress={() => void openRecording(item)} disabled={phoneActionDisabled} accessibilityLabel="Open video"><Text style={styles.recordingCtaPrimaryText}>Open</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.recordingCta} onPress={() => void downloadRecording(item)} disabled={phoneActionDisabled} accessibilityLabel="Download video to this phone"><Text style={styles.recordingCtaText}>Download</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.recordingCta} onPress={() => void shareRecording(item)} disabled={phoneActionDisabled} accessibilityLabel="Share video"><Text style={styles.recordingCtaText}>Share</Text></TouchableOpacity>
+                </View>}
+                <View style={styles.recordingCtaRow}>
+                  {isRenaming ? <>
+                    <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaPrimary, actionDisabled && styles.disabled]} onPress={() => void renameRecording(item)} disabled={actionDisabled}><Text style={styles.recordingCtaPrimaryText}>Save name</Text></TouchableOpacity>
+                    <TouchableOpacity style={styles.recordingCta} onPress={() => { setRenamingRecordingId(null); setRenamingRecordingName(""); }}><Text style={styles.recordingCtaText}>Cancel</Text></TouchableOpacity>
+                  </> : <>
+                    <TouchableOpacity style={styles.recordingCta} onPress={() => { setRenamingRecordingId(item.id); setRenamingRecordingName(item.file_name.replace(/\.mp4$/i, "")); }} disabled={actionDisabled} accessibilityLabel="Rename video"><Text style={styles.recordingCtaText}>Rename</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaDanger, actionDisabled && styles.disabled]} onPress={() => confirmDeleteRecording(item)} disabled={actionDisabled} accessibilityLabel="Delete video">
+                      {isDeleting ? <ActivityIndicator color="#fda4af" size="small" /> : <Text style={styles.recordingCtaDangerText}>Delete</Text>}
+                    </TouchableOpacity>
+                  </>}
                 </View>
               </View>
-              {isRenaming && <TextInput style={styles.renameInput} value={renamingRecordingName} onChangeText={setRenamingRecordingName} placeholder="Video name" placeholderTextColor="#8090a5" maxLength={80} returnKeyType="done" onSubmitEditing={() => void renameRecording(item)} autoFocus />}
-              {!isRenaming && item.storage_path && <View style={styles.recordingCtaRow}>
-                <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaPrimary]} onPress={() => void openRecording(item)} disabled={phoneActionDisabled} accessibilityLabel="Open video"><Text style={styles.recordingCtaPrimaryText}>Open</Text></TouchableOpacity>
-                <TouchableOpacity style={styles.recordingCta} onPress={() => void downloadRecording(item)} disabled={phoneActionDisabled} accessibilityLabel="Download video to this phone"><Text style={styles.recordingCtaText}>Download</Text></TouchableOpacity>
-                <TouchableOpacity style={styles.recordingCta} onPress={() => void shareRecording(item)} disabled={phoneActionDisabled} accessibilityLabel="Share video"><Text style={styles.recordingCtaText}>Share</Text></TouchableOpacity>
-              </View>}
-              <View style={styles.recordingCtaRow}>
-                {isRenaming ? <>
-                  <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaPrimary, actionDisabled && styles.disabled]} onPress={() => void renameRecording(item)} disabled={actionDisabled}><Text style={styles.recordingCtaPrimaryText}>Save name</Text></TouchableOpacity>
-                  <TouchableOpacity style={styles.recordingCta} onPress={() => { setRenamingRecordingId(null); setRenamingRecordingName(""); }}><Text style={styles.recordingCtaText}>Cancel</Text></TouchableOpacity>
-                </> : <>
-                  <TouchableOpacity style={styles.recordingCta} onPress={() => { setRenamingRecordingId(item.id); setRenamingRecordingName(item.file_name.replace(/\.mp4$/i, "")); }} disabled={actionDisabled} accessibilityLabel="Rename video"><Text style={styles.recordingCtaText}>Rename</Text></TouchableOpacity>
-                  <TouchableOpacity style={[styles.recordingCta, styles.recordingCtaDanger, actionDisabled && styles.disabled]} onPress={() => confirmDeleteRecording(item)} disabled={actionDisabled} accessibilityLabel="Delete video">
-                    {isDeleting ? <ActivityIndicator color="#fda4af" size="small" /> : <Text style={styles.recordingCtaDangerText}>Delete</Text>}
-                  </TouchableOpacity>
-                </>}
-              </View>
-            </View>
+            );
+          });
+
+          return recordings.length > 5 ? (
+            <ScrollView style={styles.scrollContainerRecordings} nestedScrollEnabled showsVerticalScrollIndicator>
+              {recordingCards}
+            </ScrollView>
+          ) : (
+            recordingCards
           );
-        })}
+        })()}
         {!recordingsLoading && recordings.length === 0 && <Text style={styles.muted}>Your saved clips will appear here. Turn on the phone-copy option before recording to open and share them from this list.</Text>}
       </View>
 
@@ -921,15 +969,25 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
             <Text style={styles.primaryButtonText}>{notesLoading ? "Saving..." : "Save & send"}</Text>
           </TouchableOpacity>
           {notesLoading && notes.length === 0 && <ActivityIndicator color="#60a5fa" style={styles.loader} />}
-          {notes.map((note) => (
-            <View key={note.id} style={styles.noteRow}>
-              <View style={styles.noteContent}><Text style={styles.noteName} numberOfLines={1}>{note.title}</Text><Text style={styles.notePreview} numberOfLines={2}>{note.body}</Text></View>
-              <View style={styles.noteActions}>
-                <TouchableOpacity onPress={() => void sendSavedNote(note)} disabled={!online || sending || commandBusy || !!localActiveCommand} accessibilityLabel="Send note to laptop"><Text style={[styles.sendText, (!online || sending || commandBusy || !!localActiveCommand) && styles.actionDisabled]}>Send</Text></TouchableOpacity>
-                <TouchableOpacity onPress={() => void deleteNote(note.id)} accessibilityLabel="Delete note"><Text style={styles.deleteText}>Delete</Text></TouchableOpacity>
+          {(() => {
+            const noteRows = notes.map((note) => (
+              <View key={note.id} style={styles.noteRow}>
+                <View style={styles.noteContent}><Text style={styles.noteName} numberOfLines={1}>{note.title}</Text><Text style={styles.notePreview} numberOfLines={2}>{note.body}</Text></View>
+                <View style={styles.noteActions}>
+                  <TouchableOpacity onPress={() => void sendSavedNote(note)} disabled={!online || sending || commandBusy || !!localActiveCommand} accessibilityLabel="Send note to laptop"><Text style={[styles.sendText, (!online || sending || commandBusy || !!localActiveCommand) && styles.actionDisabled]}>Send</Text></TouchableOpacity>
+                  <TouchableOpacity onPress={() => void deleteNote(note.id)} accessibilityLabel="Delete note"><Text style={styles.deleteText}>Delete</Text></TouchableOpacity>
+                </View>
               </View>
-            </View>
-          ))}
+            ));
+
+            return notes.length > 5 ? (
+              <ScrollView style={styles.scrollContainerNotes} nestedScrollEnabled showsVerticalScrollIndicator>
+                {noteRows}
+              </ScrollView>
+            ) : (
+              noteRows
+            );
+          })()}
           {!notesLoading && notes.length === 0 && <Text style={styles.muted}>Notes you save here are private to your account.</Text>}
         </>}
       </View>
@@ -1096,4 +1154,20 @@ const styles = StyleSheet.create({
     borderColor: "rgba(239, 68, 68, 0.35)",
   },
   fileCtaDeleteText: { color: "#fda4af", fontSize: 11, fontWeight: "700" },
+  scrollContainerTasks: {
+    maxHeight: 280,
+    width: "100%",
+  },
+  scrollContainerFiles: {
+    maxHeight: 330,
+    width: "100%",
+  },
+  scrollContainerRecordings: {
+    maxHeight: 360,
+    width: "100%",
+  },
+  scrollContainerNotes: {
+    maxHeight: 280,
+    width: "100%",
+  },
 });

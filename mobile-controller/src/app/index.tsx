@@ -284,6 +284,7 @@ export default function HomeScreen() {
         .select("id, device_id, image_data, created_at")
         .eq("device_id", deviceId)
         .eq("user_id", userId)
+        .like("image_data", "data:image/%")
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -1823,8 +1824,8 @@ export default function HomeScreen() {
 
                   {commandHistory.length === 0 ? (
                     <Text style={styles.emptyFeedText}>Audit trail is currently empty.</Text>
-                  ) : (
-                    commandHistory.map((cmd, idx) => (
+                  ) : (() => {
+                    const historyRows = commandHistory.map((cmd, idx) => (
                       <View
                         key={cmd.id}
                         style={[styles.historyRow, idx === 0 && styles.historyRowFirst]}
@@ -1894,8 +1895,16 @@ export default function HomeScreen() {
                           </Text>
                         </View>
                       </View>
-                    ))
-                  )}
+                    ));
+
+                    return commandHistory.length > 5 ? (
+                      <ScrollView style={styles.scrollContainerHistory} nestedScrollEnabled showsVerticalScrollIndicator>
+                        {historyRows}
+                      </ScrollView>
+                    ) : (
+                      historyRows
+                    );
+                  })()}
 
                   <View style={styles.historyFooter}>
                     <Text style={styles.footerNoteText}>
@@ -2716,6 +2725,10 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.07)",
     padding: 14,
     marginBottom: 14,
+  },
+  scrollContainerHistory: {
+    maxHeight: 290,
+    width: "100%",
   },
   historyCardHeader: {
     flexDirection: "row",

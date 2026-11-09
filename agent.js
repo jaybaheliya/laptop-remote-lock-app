@@ -1234,7 +1234,15 @@ async function pollOnce() {
           const folder = String(commandPayload.folder || "Downloads");
           const fileName = String(commandPayload.file_name || "");
           const fileData = await getLaptopFileContent(folder, fileName);
-          commandResult = { mode: "get_file", folder, ...fileData };
+          imageData = `data:application/octet-stream;name=${encodeURIComponent(fileData.file_name)};base64,${fileData.base64}`;
+          commandResult = {
+            mode: "get_file",
+            folder,
+            file_name: fileData.file_name,
+            size_kb: fileData.size_kb,
+            ready: true,
+            ...(fileData.base64.length < 8000 ? { base64: fileData.base64 } : {}),
+          };
         } else if (commandPayload.mode === "delete_file") {
           const folder = String(commandPayload.folder || "Downloads");
           const fileName = String(commandPayload.file_name || "");
