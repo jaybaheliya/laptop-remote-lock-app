@@ -37,6 +37,8 @@ type Device = {
   memory_total_gb?: number | null;
   rdp_host?: string | null;
   rdp_port?: number | null;
+  location?: any;
+  last_failed_login?: string | null;
 };
 
 type LockCommand = {
@@ -98,6 +100,76 @@ export default function HomeScreen() {
   const [rdpHostInput, setRdpHostInput] = useState("");
   const [rdpPortInput, setRdpPortInput] = useState("3389");
   const [rdpSaving, setRdpSaving] = useState(false);
+
+  // Native Push Notifications state
+  const [pushAlertsActive, setPushAlertsActive] = useState(false);
+  const previousPowerOnlineRef = useRef<boolean | null>(null);
+  const lowBatteryAlertedRef = useRef(false);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      setPushAlertsActive(Notification.permission === "granted");
+    }
+  }, []);
+
+  const requestPushPermission = useCallback(async () => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      Alert.alert(
+        "Push Notifications",
+        "Browser notifications are available on mobile Safari (iOS: tap Share -> Add to Home Screen) and Chrome Android."
+      );
+      return;
+    }
+    try {
+      const perm = await Notification.requestPermission();
+      setPushAlertsActive(perm === "granted");
+      if (perm === "granted") {
+        new Notification("🔔 Anti-Theft Alerts Activated!", {
+          body: "You will now receive instant push alerts if your laptop charger is disconnected or an intruder attempts login.",
+        });
+      } else {
+        Alert.alert(
+          "Notifications Not Allowed",
+          "Please enable notification permissions in your browser or device settings to receive real-time theft alerts."
+        );
+      }
+    } catch (e) {
+      console.warn("Notification error:", e);
+    }
+  }, []);
+
+  // Monitor charger disconnect for anti-theft notification
+  useEffect(() => {
+    if (device?.power_online != null) {
+      if (previousPowerOnlineRef.current === true && device.power_online === false) {
+        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+          new Notification("🚨 ANTI-THEFT ALARM: Charger Disconnected!", {
+            body: `Your laptop charger was unplugged! Device is now running on battery (${device.battery_level ?? "unknown"}%).`,
+          });
+          if (typeof navigator !== "undefined" && navigator.vibrate) {
+            navigator.vibrate([300, 100, 300, 100, 300]);
+          }
+        }
+      }
+      previousPowerOnlineRef.current = device.power_online;
+    }
+  }, [device?.power_online, device?.battery_level]);
+
+  // Monitor low battery for notification
+  useEffect(() => {
+    if (device?.battery_level != null && !device.is_charging && device.battery_level <= 20) {
+      if (!lowBatteryAlertedRef.current) {
+        lowBatteryAlertedRef.current = true;
+        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+          new Notification("🪫 Laptop Battery Low", {
+            body: `Laptop battery has dropped to ${device.battery_level}%. Connect the charger soon.`,
+          });
+        }
+      }
+    } else if (device?.battery_level != null && device.battery_level > 25) {
+      lowBatteryAlertedRef.current = false;
+    }
+  }, [device?.battery_level, device?.is_charging]);
 
   // Track time in state to comply with React 19 purity rules
   const [now, setNow] = useState<number>(() => Date.now());
@@ -1660,6 +1732,35 @@ export default function HomeScreen() {
                   )}
                 </View>
 
+                {/* REAL-TIME PUSH NOTIFICATIONS BANNER */}
+                <View style={styles.pushNotificationCard}>
+                  <View style={styles.pushNotificationLeft}>
+                    <Text style={styles.pushNotificationTitle}>🔔 Real-time Anti-Theft Alerts</Text>
+                    <Text style={styles.pushNotificationSub}>
+                      {pushAlertsActive
+                        ? "Instant alerts active: charger unplug, low battery & intruders"
+                        : "Enable instant alerts for charger unplug, low battery & intruders"}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[
+                      styles.pushNotificationBtn,
+                      pushAlertsActive && styles.pushNotificationBtnActive,
+                    ]}
+                    onPress={() => void requestPushPermission()}
+                    activeOpacity={0.8}
+                  >
+                    <Text
+                      style={[
+                        styles.pushNotificationBtnText,
+                        pushAlertsActive && styles.pushNotificationBtnTextActive,
+                      ]}
+                    >
+                      {pushAlertsActive ? "✅ Active" : "Enable"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
                 {/* DESKTOP SCREEN MONITOR CARD */}
                 <View style={styles.screenshotCard}>
                   <View style={styles.surveillanceTopBar}>
@@ -1669,6 +1770,18 @@ export default function HomeScreen() {
                       <Text style={styles.liveIndicatorText}>ANTI-THEFT</Text>
                     </View>
                   </View>
+
+                  {(latestScreenshot?.image_data?.includes("alert=failed_login") || Boolean(device?.last_failed_login)) && (
+                    <View style={styles.intruderAlertBanner}>
+                      <Text style={styles.intruderAlertEmoji}>🚨</Text>
+                      <View style={styles.intruderAlertTextWrap}>
+                        <Text style={styles.intruderAlertTitle}>FAILED LOGIN INTRUDER DETECTED</Text>
+                        <Text style={styles.intruderAlertSub}>
+                          An incorrect password was entered on Windows. Webcam snapshot was triggered automatically.
+                        </Text>
+                      </View>
+                    </View>
+                  )}
 
                   <View style={styles.surveillanceCtaBar}>
                     <TouchableOpacity
@@ -3308,6 +3421,83 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     letterSpacing: 0.3,
+  },
+  pushNotificationCard: {
+    width: "100%",
+    backgroundColor: "rgba(30, 41, 59, 0.7)",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.25)",
+    padding: 12,
+    marginBottom: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  pushNotificationLeft: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  pushNotificationTitle: {
+    color: "#f8fafc",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  pushNotificationSub: {
+    color: "#94a3b8",
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  pushNotificationBtn: {
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: "#2563eb",
+  },
+  pushNotificationBtnActive: {
+    backgroundColor: "rgba(34, 197, 94, 0.2)",
+    borderWidth: 1,
+    borderColor: "rgba(34, 197, 94, 0.5)",
+  },
+  pushNotificationBtnText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  pushNotificationBtnTextActive: {
+    color: "#4ade80",
+  },
+  intruderAlertBanner: {
+    width: "100%",
+    backgroundColor: "rgba(239, 68, 68, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.45)",
+    borderRadius: 10,
+    padding: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 10,
+  },
+  intruderAlertEmoji: {
+    fontSize: 18,
+  },
+  intruderAlertTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  intruderAlertTitle: {
+    color: "#f87171",
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  intruderAlertSub: {
+    color: "#fca5a5",
+    fontSize: 11,
+    lineHeight: 15,
   },
   screenshotCard: {
     width: "100%",

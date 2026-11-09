@@ -16,6 +16,19 @@ import {
 } from "react-native";
 import { supabase } from "../lib/supabase";
 
+type LaptopLocation = {
+  city?: string | null;
+  region?: string | null;
+  country?: string | null;
+  country_code?: string | null;
+  ip?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  isp?: string | null;
+  wifi?: { ssid?: string | null; signal?: number | null; bssid?: string | null } | null;
+  updated_at?: string | null;
+};
+
 type Telemetry = {
   network_name?: string | null;
   network_type?: string | null;
@@ -24,6 +37,8 @@ type Telemetry = {
   disk_total_gb?: number | null;
   memory_used_gb?: number | null;
   memory_total_gb?: number | null;
+  location?: LaptopLocation | null;
+  last_failed_login?: string | null;
 };
 
 type RunningTask = { process_id: number; name: string; window: string; memory_mb: number };
@@ -72,6 +87,19 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
   const [downloadingFileName, setDownloadingFileName] = useState<string | null>(null);
   const [sharingFileName, setSharingFileName] = useState<string | null>(null);
   const [deletingFileName, setDeletingFileName] = useState<string | null>(null);
+
+  const [locationExpanded, setLocationExpanded] = useState(false);
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationData, setLocationData] = useState<LaptopLocation | null>(null);
+
+  const [mediaExpanded, setMediaExpanded] = useState(false);
+  const [mediaLoadingAction, setMediaLoadingAction] = useState<string | null>(null);
+  const [mediaStatus, setMediaStatus] = useState<string | null>(null);
+
+  const [urlExpanded, setUrlExpanded] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
+  const [urlLoading, setUrlLoading] = useState(false);
+  const [urlStatus, setUrlStatus] = useState<string | null>(null);
 
   const loadRecordings = useCallback(async () => {
     setRecordingsLoading(true);
@@ -172,6 +200,89 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
       setSending(false);
     }
   }, [commandBusy, deviceId, localActiveCommand, sending]);
+
+  const locateLaptop = useCallback(async () => {
+    setLocationLoading(true);
+    const commandId = await sendCommand("task_list", { mode: "locate" });
+    if (!commandId) {
+      setLocationLoading(false);
+      return;
+    }
+    try {
+      for (let attempt = 0; attempt < 18; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const { data, error } = await supabase
+          .from("commands")
+          .select("status,result,failure_reason")
+          .eq("id", commandId)
+          .eq("user_id", userId)
+          .maybeSingle();
+        if (error) throw error;
+        if (data?.status === "completed") {
+          const res = data.result as { mode?: string; location?: LaptopLocation } | null;
+          if (res?.location) {
+            setLocationData(res.location);
+          }
+          return;
+        }
+        if (data?.status === "failed") throw new Error(data.failure_reason || "Could not retrieve laptop location.");
+      }
+      Alert.alert("Still waiting", "Laptop is taking longer than usual to return its coordinates.");
+    } catch (err) {
+      Alert.alert("Location check failed", err instanceof Error ? err.message : "Try again when laptop is online.");
+    } finally {
+      setLocationLoading(false);
+    }
+  }, [sendCommand, userId]);
+
+  const sendMediaControl = useCallback(async (subAction: string, value?: number) => {
+    setMediaLoadingAction(subAction);
+    setMediaStatus(null);
+    try {
+      const commandId = await sendCommand("task_list", { mode: "media", sub_action: subAction, value });
+      if (commandId) {
+        const labels: Record<string, string> = {
+          play_pause: "Play / Pause",
+          next: "Next Track",
+          prev: "Previous Track",
+          mute: "Mute",
+          vol_up: "Volume Up",
+          vol_down: "Volume Down",
+          set_25: "Volume 25%",
+          set_50: "Volume 50%",
+          set_75: "Volume 75%",
+          set_100: "Volume 100%",
+        };
+        const label = labels[subAction] || subAction;
+        setMediaStatus(`Sent: ${label}`);
+        setTimeout(() => setMediaStatus(null), 4000);
+      }
+    } finally {
+      setMediaLoadingAction(null);
+    }
+  }, [sendCommand]);
+
+  const pushUrlToLaptop = useCallback(async (customUrl?: string) => {
+    let raw = (customUrl || urlInput).trim();
+    if (!raw) return;
+    if (!raw.startsWith("http://") && !raw.startsWith("https://")) {
+      raw = `https://${raw}`;
+    }
+    setUrlLoading(true);
+    setUrlStatus(null);
+    try {
+      const commandId = await sendCommand("task_list", { mode: "open_url", url: raw });
+      if (commandId) {
+        setUrlStatus(`🚀 Opening ${raw} on laptop...`);
+        setUrlInput("");
+        setTimeout(() => setUrlStatus(null), 6000);
+      }
+    } catch (err) {
+      Alert.alert("Could not open link", err instanceof Error ? err.message : "Error pushing URL to laptop.");
+    } finally {
+      setUrlLoading(false);
+    }
+  }, [sendCommand, urlInput]);
 
   async function sendMessage() {
     const value = message.trim();
@@ -749,6 +860,323 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
         </>}
       </View>
 
+      {/* 1. FIND MY LAPTOP & LOCATION TRACKER */}
+      <View style={styles.card}>
+        <TouchableOpacity
+          style={styles.sectionHeader}
+          onPress={() => {
+            const next = !locationExpanded;
+            setLocationExpanded(next);
+            if (next && !locationData) void locateLaptop();
+          }}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: locationExpanded }}
+        >
+          <View>
+            <Text style={styles.title}>🗺️ Find My Laptop</Text>
+            <Text style={styles.subtitle}>
+              {locationData?.city
+                ? `${locationData.city}, ${locationData.country || ""}`
+                : (telemetry.location?.city
+                  ? `${telemetry.location.city}, ${telemetry.location.country || ""}`
+                  : "Live GPS & Wi-Fi tracker")}
+            </Text>
+          </View>
+          <Text style={styles.chevron}>{locationExpanded ? "-" : "+"}</Text>
+        </TouchableOpacity>
+        {locationExpanded && (
+          <View style={styles.locationContainer}>
+            {(() => {
+              const activeLoc = locationData || telemetry.location;
+              return (
+                <>
+                  <View style={styles.locationPillsRow}>
+                    <View style={styles.locationBadgePill}>
+                      <Text style={styles.locationBadgeDot}>🛰️</Text>
+                      <Text style={styles.locationBadgeText}>GPS / IP ESTIMATE</Text>
+                    </View>
+                    {activeLoc?.wifi?.ssid && (
+                      <View style={styles.wifiBadgePill}>
+                        <Text style={styles.wifiBadgeText}>
+                          📶 {activeLoc.wifi.ssid} ({activeLoc.wifi.signal ?? 95}%)
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={styles.locationDetailsBox}>
+                    <View style={styles.infoRow}>
+                      <Text style={styles.infoLabel}>Estimated City</Text>
+                      <Text style={styles.infoValue}>
+                        {activeLoc?.city ? `${activeLoc.city}, ${activeLoc.region || ""}` : "Locating..."}
+                      </Text>
+                    </View>
+                    <View style={styles.infoRow}>
+                      <Text style={styles.infoLabel}>Country</Text>
+                      <Text style={styles.infoValue}>{activeLoc?.country || "\u2014"}</Text>
+                    </View>
+                    <View style={styles.infoRow}>
+                      <Text style={styles.infoLabel}>Public IP & ISP</Text>
+                      <Text style={styles.infoValue}>
+                        {activeLoc?.ip ? `${activeLoc.ip} (${activeLoc.isp || "ISP"})` : (telemetry.local_ip || "\u2014")}
+                      </Text>
+                    </View>
+                    {activeLoc?.latitude != null && activeLoc?.longitude != null && (
+                      <View style={styles.infoRow}>
+                        <Text style={styles.infoLabel}>Coordinates</Text>
+                        <Text style={styles.infoValue}>
+                          {activeLoc.latitude.toFixed(4)}°, {activeLoc.longitude.toFixed(4)}°
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={styles.actionRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.actionButton,
+                        (!activeLoc?.latitude || !activeLoc?.longitude) && styles.disabled,
+                      ]}
+                      onPress={() => {
+                        if (activeLoc?.latitude && activeLoc?.longitude) {
+                          const url = `https://www.google.com/maps?q=${activeLoc.latitude},${activeLoc.longitude}`;
+                          if (Platform.OS === "web") {
+                            window.open(url, "_blank");
+                          } else {
+                            void Linking.openURL(url);
+                          }
+                        }
+                      }}
+                      disabled={!activeLoc?.latitude || !activeLoc?.longitude}
+                    >
+                      <Text style={styles.primaryButtonText}>🗺️ Open in Google Maps</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.panicButton,
+                        (!online || locationLoading || sending || commandBusy || !!localActiveCommand) && styles.disabled,
+                      ]}
+                      onPress={() => void locateLaptop()}
+                      disabled={!online || locationLoading || sending || commandBusy || !!localActiveCommand}
+                    >
+                      {locationLoading ? (
+                        <ActivityIndicator color="#38bdf8" size="small" />
+                      ) : (
+                        <Text style={styles.locateBtnText}>🔄 Refresh</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </>
+              );
+            })()}
+          </View>
+        )}
+      </View>
+
+      {/* 2. MEDIA & VOLUME CONTROLLER */}
+      <View style={styles.card}>
+        <TouchableOpacity
+          style={styles.sectionHeader}
+          onPress={() => setMediaExpanded((v) => !v)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: mediaExpanded }}
+        >
+          <View>
+            <Text style={styles.title}>🔊 Media & Master Volume</Text>
+            <Text style={styles.subtitle}>
+              {mediaStatus ? mediaStatus : "Play, pause, skip & volume controls"}
+            </Text>
+          </View>
+          <Text style={styles.chevron}>{mediaExpanded ? "-" : "+"}</Text>
+        </TouchableOpacity>
+        {mediaExpanded && (
+          <View style={styles.mediaContainer}>
+            <Text style={styles.muted}>Control media playback and master volume remotely on your Windows laptop.</Text>
+            
+            {/* Playback Controls */}
+            <View style={styles.mediaControlsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.mediaBtn,
+                  (!online || mediaLoadingAction !== null || commandBusy) && styles.disabled,
+                ]}
+                onPress={() => void sendMediaControl("prev")}
+                disabled={!online || mediaLoadingAction !== null || commandBusy}
+              >
+                <Text style={styles.mediaBtnText}>⏮️ Prev</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.mediaBtn,
+                  styles.mediaPlayBtn,
+                  (!online || mediaLoadingAction !== null || commandBusy) && styles.disabled,
+                ]}
+                onPress={() => void sendMediaControl("play_pause")}
+                disabled={!online || mediaLoadingAction !== null || commandBusy}
+              >
+                {mediaLoadingAction === "play_pause" ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.mediaPlayBtnText}>⏯️ Play / Pause</Text>
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.mediaBtn,
+                  (!online || mediaLoadingAction !== null || commandBusy) && styles.disabled,
+                ]}
+                onPress={() => void sendMediaControl("next")}
+                disabled={!online || mediaLoadingAction !== null || commandBusy}
+              >
+                <Text style={styles.mediaBtnText}>⏭️ Next</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Volume Steppers & Mute */}
+            <View style={styles.mediaControlsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.mediaBtn,
+                  styles.muteBtn,
+                  (!online || mediaLoadingAction !== null || commandBusy) && styles.disabled,
+                ]}
+                onPress={() => void sendMediaControl("mute")}
+                disabled={!online || mediaLoadingAction !== null || commandBusy}
+              >
+                <Text style={styles.muteBtnText}>🔇 Mute</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.mediaBtn,
+                  (!online || mediaLoadingAction !== null || commandBusy) && styles.disabled,
+                ]}
+                onPress={() => void sendMediaControl("vol_down")}
+                disabled={!online || mediaLoadingAction !== null || commandBusy}
+              >
+                <Text style={styles.mediaBtnText}>🔉 Vol -</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.mediaBtn,
+                  (!online || mediaLoadingAction !== null || commandBusy) && styles.disabled,
+                ]}
+                onPress={() => void sendMediaControl("vol_up")}
+                disabled={!online || mediaLoadingAction !== null || commandBusy}
+              >
+                <Text style={styles.mediaBtnText}>🔊 Vol +</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Master Volume Presets */}
+            <View style={styles.volumePresetsRow}>
+              {(["set_25", "set_50", "set_75", "set_100"] as const).map((preset) => {
+                const pct = preset.replace("set_", "") + "%";
+                return (
+                  <TouchableOpacity
+                    key={preset}
+                    style={[
+                      styles.presetPill,
+                      (!online || mediaLoadingAction !== null || commandBusy) && styles.disabled,
+                    ]}
+                    onPress={() => void sendMediaControl(preset)}
+                    disabled={!online || mediaLoadingAction !== null || commandBusy}
+                  >
+                    <Text style={styles.presetPillText}>{pct}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {mediaStatus && (
+              <View style={styles.mediaStatusPill}>
+                <Text style={styles.mediaStatusText}>{mediaStatus}</Text>
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+
+      {/* 3. REMOTE OPEN URL PUSH */}
+      <View style={styles.card}>
+        <TouchableOpacity
+          style={styles.sectionHeader}
+          onPress={() => setUrlExpanded((v) => !v)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: urlExpanded }}
+        >
+          <View>
+            <Text style={styles.title}>🌐 Push URL to Laptop</Text>
+            <Text style={styles.subtitle}>
+              {urlStatus ? urlStatus : "Open web links in your laptop default browser"}
+            </Text>
+          </View>
+          <Text style={styles.chevron}>{urlExpanded ? "-" : "+"}</Text>
+        </TouchableOpacity>
+        {urlExpanded && (
+          <View style={styles.urlContainer}>
+            <Text style={styles.muted}>Type or paste any web link to open it immediately on your Windows desktop.</Text>
+            <TextInput
+              style={[styles.input, { fontSize: 16 }]}
+              placeholder="https://youtube.com or website URL..."
+              placeholderTextColor="#8090a5"
+              value={urlInput}
+              onChangeText={setUrlInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+            />
+
+            {/* Quick preset chips */}
+            <View style={styles.urlChipsRow}>
+              {[
+                { name: "YouTube", url: "https://youtube.com" },
+                { name: "Google", url: "https://google.com" },
+                { name: "GitHub", url: "https://github.com" },
+                { name: "ChatGPT", url: "https://chatgpt.com" },
+              ].map((chip) => (
+                <TouchableOpacity
+                  key={chip.name}
+                  style={styles.urlChip}
+                  onPress={() => {
+                    setUrlInput(chip.url);
+                    void pushUrlToLaptop(chip.url);
+                  }}
+                  disabled={!online || urlLoading || commandBusy}
+                >
+                  <Text style={styles.urlChipText}>{chip.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <TouchableOpacity
+              style={[
+                styles.primaryButton,
+                (!online || urlLoading || !urlInput.trim() || commandBusy) && styles.disabled,
+              ]}
+              onPress={() => void pushUrlToLaptop()}
+              disabled={!online || urlLoading || !urlInput.trim() || commandBusy}
+            >
+              {urlLoading ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <Text style={styles.primaryButtonText}>🚀 Open on Laptop</Text>
+              )}
+            </TouchableOpacity>
+
+            {urlStatus && (
+              <View style={styles.urlSuccessBox}>
+                <Text style={styles.urlSuccessText}>{urlStatus}</Text>
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+
       <View style={styles.card}>
         <TouchableOpacity style={styles.sectionHeader} onPress={() => setAppsExpanded((value) => !value)} accessibilityRole="button" accessibilityState={{ expanded: appsExpanded }}>
           <View><Text style={styles.title}>Running apps</Text><Text style={styles.subtitle}>{appsExpanded ? "Close apps or trigger privacy wipe" : "See open apps on your laptop"}</Text></View>
@@ -1169,5 +1597,180 @@ const styles = StyleSheet.create({
   scrollContainerNotes: {
     maxHeight: 280,
     width: "100%",
+  },
+  locationContainer: {
+    gap: 10,
+    marginTop: 4,
+    width: "100%",
+  },
+  locationPillsRow: {
+    flexDirection: "row",
+    gap: 8,
+    flexWrap: "wrap",
+    alignItems: "center",
+  },
+  locationBadgePill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    backgroundColor: "rgba(56, 189, 248, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.3)",
+    borderRadius: 8,
+  },
+  locationBadgeDot: {
+    fontSize: 11,
+  },
+  locationBadgeText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#38bdf8",
+    letterSpacing: 0.5,
+  },
+  wifiBadgePill: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    backgroundColor: "rgba(34, 197, 94, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(34, 197, 94, 0.3)",
+    borderRadius: 8,
+  },
+  wifiBadgeText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#4ade80",
+  },
+  locationDetailsBox: {
+    backgroundColor: "rgba(11, 18, 32, 0.6)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.06)",
+    borderRadius: 12,
+    padding: 10,
+    gap: 6,
+    width: "100%",
+  },
+  locateBtnText: {
+    color: "#38bdf8",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  mediaContainer: {
+    gap: 10,
+    marginTop: 4,
+    width: "100%",
+  },
+  mediaControlsRow: {
+    flexDirection: "row",
+    gap: 8,
+    width: "100%",
+  },
+  mediaBtn: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 10,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.1)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 8,
+  },
+  mediaBtnText: {
+    color: "#e2e8f0",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  mediaPlayBtn: {
+    flex: 1.2,
+    backgroundColor: "#2563eb",
+    borderColor: "#3b82f6",
+  },
+  mediaPlayBtnText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  muteBtn: {
+    backgroundColor: "rgba(239, 68, 68, 0.1)",
+    borderColor: "rgba(239, 68, 68, 0.3)",
+  },
+  muteBtnText: {
+    color: "#f87171",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  volumePresetsRow: {
+    flexDirection: "row",
+    gap: 8,
+    width: "100%",
+  },
+  presetPill: {
+    flex: 1,
+    minHeight: 38,
+    borderRadius: 9,
+    backgroundColor: "rgba(56, 189, 248, 0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(56, 189, 248, 0.25)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  presetPillText: {
+    color: "#38bdf8",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  mediaStatusPill: {
+    backgroundColor: "rgba(34, 197, 94, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(34, 197, 94, 0.3)",
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    alignSelf: "flex-start",
+  },
+  mediaStatusText: {
+    color: "#4ade80",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  urlContainer: {
+    gap: 10,
+    marginTop: 4,
+    width: "100%",
+  },
+  urlChipsRow: {
+    flexDirection: "row",
+    gap: 8,
+    flexWrap: "wrap",
+    width: "100%",
+  },
+  urlChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.1)",
+  },
+  urlChipText: {
+    color: "#94a3b8",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  urlSuccessBox: {
+    backgroundColor: "rgba(34, 197, 94, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(34, 197, 94, 0.3)",
+    borderRadius: 8,
+    padding: 8,
+    width: "100%",
+  },
+  urlSuccessText: {
+    color: "#4ade80",
+    fontSize: 12,
+    fontWeight: "600",
+    textAlign: "center",
   },
 });
