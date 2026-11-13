@@ -36,10 +36,13 @@ if not exist "%NODE_EXE%" (
 )
 
 :: Launch native system tray notification icon (if present and not already running)
-if exist "%APP_DIR%\app\LaptopLockAgentTray.exe" (
-    start "" "%APP_DIR%\app\LaptopLockAgentTray.exe"
-) else if exist "%APP_DIR%\app\tray.ps1" (
-    start "" /b powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%APP_DIR%\app\tray.ps1"
+tasklist /FI "IMAGENAME eq LaptopLockAgentTray.exe" 2>nul | find /I "LaptopLockAgentTray.exe" >nul
+if errorlevel 1 (
+    if exist "%APP_DIR%\app\LaptopLockAgentTray.exe" (
+        start "" "%APP_DIR%\app\LaptopLockAgentTray.exe"
+    ) else if exist "%APP_DIR%\app\tray.ps1" (
+        start "" /b powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%APP_DIR%\app\tray.ps1"
+    )
 )
 
 :restart

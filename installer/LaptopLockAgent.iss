@@ -5,7 +5,7 @@
 ; =====================================================================
 
 #define MyAppName "Laptop Remote Lock Agent"
-#define MyAppVersion "1.5.3"
+#define MyAppVersion "1.6.0"
 #define MyAppPublisher "Security Defense Console"
 #define MyAppExeName "start-agent-hidden.vbs"
 
@@ -59,14 +59,38 @@ var
 procedure StopExistingAgent;
 var
   ErrorCode: Integer;
-  Params: String;
+  ConfigDir, ScriptPath, PsCommand: String;
 begin
-  if not FileExists(ExpandConstant('{app}\runner\stop-agent.ps1')) or
-     not FileExists(ExpandConstant('{app}\app\agent.js')) then
-    Exit;
+  ConfigDir := ExpandConstant('{localappdata}\LaptopLockAgent');
+  ForceDirectories(ConfigDir);
 
-  Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\runner\stop-agent.ps1') + '" -AgentScriptPath "' + ExpandConstant('{app}\app\agent.js') + '"';
-  Exec('powershell.exe', Params, '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
+  // Set stop flag so running batch loops exit immediately
+  SaveStringToFile(ConfigDir + '\agent.stop', 'stop', False);
+
+  // Run installed stop-agent.ps1 if present
+  ScriptPath := ExpandConstant('{app}\runner\stop-agent.ps1');
+  if FileExists(ScriptPath) then
+  begin
+    Exec('powershell.exe',
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ScriptPath + '"',
+      '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
+  end;
+
+  // Direct cleanup to guarantee all tray, node, and agent processes are closed
+  PsCommand := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
+    '$ErrorActionPreference = ''SilentlyContinue''; ' +
+    'Get-Process LaptopLockAgentTray | Stop-Process -Force; ' +
+    '$pidFile = Join-Path ''' + ConfigDir + ''' ''.agent.pid''; ' +
+    'if (Test-Path $pidFile) { $p = (Get-Content $pidFile -Raw).Trim(); if ($p -match ''^\d+$'') { Stop-Process -Id ([int]$p) -Force } }; ' +
+    'Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine -like ''*agent.js*'' -or $_.CommandLine -like ''*LaptopLockAgent*'') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; ' +
+    'Start-Sleep -Milliseconds 600"';
+  Exec('powershell.exe', PsCommand, '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  StopExistingAgent;
 end;
 
 procedure InitializeWizard;
@@ -94,8 +118,13 @@ begin
     PairKeyRaw := Trim(PairingPage.Values[0]);
     if Length(PairKeyRaw) = 0 then
     begin
-      MsgBox('Please paste your Pairing Key before continuing.', mbError, MB_OK);
-      Result := False;
+      if MsgBox('No Pairing Key was entered.'#13#10#13#10 +
+                'The agent requires pairing credentials to communicate with your mobile controller dashboard.'#13#10#13#10 +
+                'Do you want to continue installation anyway? (You can configure the key later)',
+                mbConfirmation, MB_YESNO) = IDNO then
+      begin
+        Result := False;
+      end;
     end;
   end;
 end;
