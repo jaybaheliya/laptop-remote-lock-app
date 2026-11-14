@@ -313,6 +313,9 @@ let lastTelemetryFetchTime = 0;
 function getSystemTelemetry() {
   const now = Date.now();
   if (cachedTelemetry && now - lastTelemetryFetchTime < 15000) return Promise.resolve(cachedTelemetry);
+  if (!cachedLocation && !isLocationFetching) {
+    getDeviceLocation().catch(() => {});
+  }
   const script = String.raw`$ErrorActionPreference='SilentlyContinue'; $drive=$env:SystemDrive; $disk=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'"; $os=Get-CimInstance Win32_OperatingSystem; $profile=Get-NetConnectionProfile | Where-Object {$_.IPv4Connectivity -ne 'Disconnected'} | Select-Object -First 1; $ip=Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254*'} | Select-Object -First 1; [PSCustomObject]@{network_name=if($profile){$profile.Name}else{$null};network_type=if($profile){$profile.NetworkCategory.ToString()}else{'Unknown'};local_ip=if($ip){$ip.IPAddress}else{$null};disk_free_gb=if($disk){[math]::Round($disk.FreeSpace/1GB,2)}else{$null};disk_total_gb=if($disk){[math]::Round($disk.Size/1GB,2)}else{$null};memory_used_gb=if($os){[math]::Round(($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)/1MB,2)}else{$null};memory_total_gb=if($os){[math]::Round($os.TotalVisibleMemorySize/1MB,2)}else{$null}} | ConvertTo-Json -Compress`;
   return new Promise((resolve) => {
     const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { shell: false, windowsHide: true });
@@ -827,87 +830,189 @@ function unlockOrWakeWindows() {
 
 let cachedLocation = null;
 let lastLocationFetchTime = 0;
+let isLocationFetching = false;
 
-async function getDeviceLocation() {
+function getWindowsGps() {
+  return new Promise((resolve) => {
+    const script = `
+      Add-Type -AssemblyName System.Device -ErrorAction SilentlyContinue
+      try {
+        $watcher = New-Object System.Device.Location.GeoCoordinateWatcher([System.Device.Location.GeoPositionAccuracy]::High)
+        $watcher.Start()
+        $i = 0
+        while (($watcher.Status -ne [System.Device.Location.GeoPositionStatus]::Ready) -and ($i -lt 25)) {
+          Start-Sleep -Milliseconds 200
+          $i++
+        }
+        $pos = $watcher.Position.Location
+        if (-not $pos.IsUnknown -and $pos.Latitude -ne 0 -and $pos.Longitude -ne 0) {
+          [PSCustomObject]@{
+            success = $true
+            latitude = [math]::Round($pos.Latitude, 6)
+            longitude = [math]::Round($pos.Longitude, 6)
+            accuracy_meters = [math]::Round($pos.HorizontalAccuracy)
+          } | ConvertTo-Json -Compress
+        }
+        $watcher.Stop()
+        $watcher.Dispose()
+      } catch {}
+    `;
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      shell: false,
+      windowsHide: true,
+    });
+    let stdout = "";
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch {}
+      resolve(null);
+    }, 6000);
+    child.stdout.on("data", (d) => { stdout += d.toString(); });
+    child.once("close", () => {
+      clearTimeout(timer);
+      try {
+        const res = JSON.parse(stdout.trim());
+        resolve(res);
+      } catch {
+        resolve(null);
+      }
+    });
+    child.once("error", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+  });
+}
+
+async function getDeviceLocation(forceRefresh = false) {
   const now = Date.now();
-  if (cachedLocation && now - lastLocationFetchTime < 60000) {
+  if (!forceRefresh && cachedLocation && now - lastLocationFetchTime < 60000) {
     return cachedLocation;
   }
+  if (isLocationFetching && cachedLocation) {
+    return cachedLocation;
+  }
+  isLocationFetching = true;
 
-  // 1. Query Wi-Fi info via netsh
-  let wifiInfo = null;
   try {
-    const wlanOutput = await new Promise((resolve) => {
-      exec("netsh wlan show interfaces", { timeout: 3000 }, (err, stdout) => {
-        resolve(stdout || "");
-      });
-    });
-    const ssidMatch = wlanOutput.match(/^\s*SSID\s*:\s*(.+)$/m);
-    const signalMatch = wlanOutput.match(/^\s*Signal\s*:\s*(\d+)%/m);
-    const bssidMatch = wlanOutput.match(/^\s*BSSID\s*:\s*([0-9a-f:]{17})/im);
-    if (ssidMatch && ssidMatch[1] && !ssidMatch[0].toLowerCase().includes("bssid")) {
-      wifiInfo = {
-        ssid: ssidMatch[1].trim(),
-        signal: signalMatch ? parseInt(signalMatch[1], 10) : null,
-        bssid: bssidMatch ? bssidMatch[1].trim() : null,
-      };
-    }
-  } catch {}
+    // 1. In parallel: Windows native Location API (GPS / Wi-Fi positioning), IP Geo, and Wi-Fi interface details
+    const [winGps, ipData, wlanOutput] = await Promise.all([
+      getWindowsGps().catch(() => null),
+      (async () => {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 3500);
+          const res = await fetch("https://ipwho.is/", { signal: controller.signal });
+          clearTimeout(timer);
+          if (res.ok) {
+            const d = await res.json();
+            if (d && d.success !== false) return d;
+          }
+        } catch {}
+        try {
+          const controller2 = new AbortController();
+          const timer2 = setTimeout(() => controller2.abort(), 3000);
+          const res2 = await fetch("http://ip-api.com/json", { signal: controller2.signal });
+          clearTimeout(timer2);
+          if (res2.ok) {
+            const d2 = await res2.json();
+            if (d2 && d2.status === "success") {
+              return {
+                ip: d2.query,
+                city: d2.city,
+                region: d2.regionName,
+                country: d2.country,
+                country_code: d2.countryCode,
+                latitude: d2.lat,
+                longitude: d2.lon,
+                connection: { isp: d2.isp },
+              };
+            }
+          }
+        } catch {}
+        return null;
+      })(),
+      new Promise((resolve) => {
+        exec("netsh wlan show interfaces", { timeout: 3000 }, (err, stdout) => {
+          resolve(stdout || "");
+        });
+      }),
+    ]);
 
-  // 2. Query IP Geolocation API with timeout
-  let geo = null;
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3500);
-    const res = await fetch("https://ipwho.is/", { signal: controller.signal });
-    clearTimeout(timer);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.success !== false) {
-        geo = {
-          ip: data.ip || null,
-          city: data.city || null,
-          region: data.region || null,
-          country: data.country || null,
-          country_code: data.country_code || null,
-          latitude: typeof data.latitude === "number" ? data.latitude : null,
-          longitude: typeof data.longitude === "number" ? data.longitude : null,
-          isp: data.connection?.isp || data.isp || null,
+    // 2. Parse Wi-Fi interface details
+    let wifiInfo = null;
+    if (wlanOutput) {
+      const ssidMatch = wlanOutput.match(/^\s*SSID\s*:\s*(.+)$/m);
+      const signalMatch = wlanOutput.match(/^\s*Signal\s*:\s*(\d+)%/m);
+      const bssidMatch = wlanOutput.match(/^\s*BSSID\s*:\s*([0-9a-f:]{17})/im);
+      if (ssidMatch && ssidMatch[1] && !ssidMatch[0].toLowerCase().includes("bssid")) {
+        wifiInfo = {
+          ssid: ssidMatch[1].trim(),
+          signal: signalMatch ? parseInt(signalMatch[1], 10) : null,
+          bssid: bssidMatch ? bssidMatch[1].trim() : null,
         };
       }
     }
-  } catch {
-    // Fallback
-    try {
-      const controller2 = new AbortController();
-      const timer2 = setTimeout(() => controller2.abort(), 3000);
-      const res2 = await fetch("http://ip-api.com/json", { signal: controller2.signal });
-      clearTimeout(timer2);
-      if (res2.ok) {
-        const data2 = await res2.json();
-        if (data2 && data2.status === "success") {
-          geo = {
-            ip: data2.query || null,
-            city: data2.city || null,
-            region: data2.regionName || null,
-            country: data2.country || null,
-            country_code: data2.countryCode || null,
-            latitude: typeof data2.lat === "number" ? data2.lat : null,
-            longitude: typeof data2.lon === "number" ? data2.lon : null,
-            isp: data2.isp || null,
-          };
+
+    // 3. Coordinate selection: prioritize High-Precision Windows Location API
+    const hasGps = winGps && typeof winGps.latitude === "number" && typeof winGps.longitude === "number";
+    const finalLat = hasGps ? winGps.latitude : (typeof ipData?.latitude === "number" ? ipData.latitude : null);
+    const finalLon = hasGps ? winGps.longitude : (typeof ipData?.longitude === "number" ? ipData.longitude : null);
+    const finalAccuracy = hasGps ? winGps.accuracy_meters : null;
+    const source = hasGps ? "windows_gps" : "ip_estimate";
+    let city = ipData?.city || null;
+    let region = ipData?.region || null;
+    let country = ipData?.country || null;
+    let countryCode = ipData?.country_code || null;
+
+    // 4. Reverse geocode if high-precision coordinates are available
+    if (hasGps) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3500);
+        const revRes = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${winGps.latitude}&lon=${winGps.longitude}&zoom=16&addressdetails=1`,
+          {
+            headers: { "User-Agent": "LaptopLockAgent/1.6.0 (admin@laptoplock.local)" },
+            signal: controller.signal,
+          }
+        );
+        clearTimeout(timer);
+        if (revRes.ok) {
+          const revData = await revRes.json();
+          const addr = revData.address || {};
+          const localArea = addr.neighbourhood || addr.suburb || addr.city_district || addr.village || addr.residential || "";
+          const cityName = addr.city || addr.town || addr.municipality || city || "";
+          if (localArea && cityName && localArea !== cityName) {
+            city = `${localArea}, ${cityName}`;
+          } else if (localArea || cityName) {
+            city = localArea || cityName;
+          }
+          if (addr.state) region = addr.state;
+          if (addr.country) country = addr.country;
+          if (addr.country_code) countryCode = addr.country_code.toUpperCase();
         }
-      }
-    } catch {}
+      } catch {}
+    }
+
+    cachedLocation = {
+      latitude: finalLat,
+      longitude: finalLon,
+      accuracy_meters: finalAccuracy,
+      source,
+      city,
+      region,
+      country,
+      country_code: countryCode,
+      ip: ipData?.ip || null,
+      isp: ipData?.connection?.isp || ipData?.isp || null,
+      wifi: wifiInfo,
+      updated_at: new Date().toISOString(),
+    };
+    lastLocationFetchTime = now;
+  } finally {
+    isLocationFetching = false;
   }
 
-  cachedLocation = {
-    ...(geo || {}),
-    geo,
-    wifi: wifiInfo,
-    updated_at: new Date().toISOString(),
-  };
-  lastLocationFetchTime = now;
   return cachedLocation;
 }
 
@@ -1490,7 +1595,7 @@ async function pollOnce() {
           const closeResult = await closeWebBrowsers();
           commandResult = { mode: "close_browsers", ...closeResult };
         } else if (commandPayload.mode === "locate") {
-          const loc = await getDeviceLocation();
+          const loc = await getDeviceLocation(true);
           const location = { ...(loc?.geo || {}), ...loc, wifi: loc?.wifi };
           commandResult = { mode: "locate", location };
         } else if (commandPayload.mode === "media") {

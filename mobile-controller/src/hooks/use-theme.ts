@@ -1,14 +1,26 @@
 /**
- * Learn more about light and dark modes:
- * https://docs.expo.dev/guides/color-schemes/
+ * Theme hook.
+ *
+ * Returns the resolved color palette for the current color scheme. The
+ * controller UI is dark-first, but all colors come from this hook so the
+ * same components render correctly in light mode on supported devices.
  */
 
-import { Colors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useMemo } from 'react';
+import { useColorScheme } from 'react-native';
 
-export function useTheme() {
+import { Colors, ThemeColors } from '@/constants/theme';
+
+export type ThemeMode = 'light' | 'dark';
+
+export function useTheme(): ThemeColors {
   const scheme = useColorScheme();
-  const theme = scheme === 'unspecified' ? 'light' : scheme;
+  return useMemo(() => {
+    if (scheme === 'dark') return Colors.dark;
+    return Colors.light;
+  }, [scheme]);
+}
 
-  return Colors[theme];
+export function useIsDark(): boolean {
+  return useColorScheme() === 'dark';
 }

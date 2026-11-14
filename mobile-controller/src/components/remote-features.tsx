@@ -24,6 +24,8 @@ type LaptopLocation = {
   ip?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  accuracy_meters?: number | null;
+  source?: string | null;
   isp?: string | null;
   wifi?: { ssid?: string | null; signal?: number | null; bssid?: string | null } | null;
   geo?: any;
@@ -232,6 +234,8 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
               ip: loc.ip || geo.ip || null,
               latitude: typeof loc.latitude === "number" ? loc.latitude : (typeof geo.latitude === "number" ? geo.latitude : null),
               longitude: typeof loc.longitude === "number" ? loc.longitude : (typeof geo.longitude === "number" ? geo.longitude : null),
+              accuracy_meters: typeof loc.accuracy_meters === "number" ? loc.accuracy_meters : (typeof geo.accuracy_meters === "number" ? geo.accuracy_meters : null),
+              source: loc.source || geo.source || (loc.accuracy_meters ? "windows_gps" : "ip_estimate"),
               isp: loc.isp || geo.isp || null,
               wifi: loc.wifi || null,
               geo,
@@ -264,6 +268,8 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
         ip: loc.ip || geo.ip || null,
         latitude: typeof loc.latitude === "number" ? loc.latitude : (typeof geo.latitude === "number" ? geo.latitude : null),
         longitude: typeof loc.longitude === "number" ? loc.longitude : (typeof geo.longitude === "number" ? geo.longitude : null),
+        accuracy_meters: typeof loc.accuracy_meters === "number" ? loc.accuracy_meters : (typeof geo.accuracy_meters === "number" ? geo.accuracy_meters : null),
+        source: loc.source || geo.source || (loc.accuracy_meters ? "windows_gps" : "ip_estimate"),
         isp: loc.isp || geo.isp || null,
         wifi: loc.wifi || null,
         geo,
@@ -932,6 +938,9 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
               const geo = (activeLoc as any)?.geo || {};
               const lat = activeLoc?.latitude ?? geo.latitude ?? null;
               const lon = activeLoc?.longitude ?? geo.longitude ?? null;
+              const accuracy = activeLoc?.accuracy_meters ?? geo.accuracy_meters ?? null;
+              const source = activeLoc?.source ?? geo.source ?? (accuracy ? "windows_gps" : "ip_estimate");
+              const isGps = source === "windows_gps" || (accuracy != null && accuracy < 1000);
               const city = activeLoc?.city || geo.city || "";
               const region = activeLoc?.region || geo.region || "";
               const country = activeLoc?.country || geo.country || "";
@@ -942,9 +951,16 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
               return (
                 <>
                   <View style={styles.locationPillsRow}>
-                    <View style={styles.locationBadgePill}>
-                      <Text style={styles.locationBadgeDot}>🛰️</Text>
-                      <Text style={styles.locationBadgeText}>GPS / IP ESTIMATE</Text>
+                    <View
+                      style={[
+                        styles.locationBadgePill,
+                        isGps && { backgroundColor: "rgba(34, 197, 94, 0.15)", borderColor: "rgba(34, 197, 94, 0.4)" },
+                      ]}
+                    >
+                      <Text style={styles.locationBadgeDot}>{isGps ? "🎯" : "🛰️"}</Text>
+                      <Text style={[styles.locationBadgeText, isGps && { color: "#4ade80" }]}>
+                        {isGps ? `HIGH-PRECISION GPS ${accuracy ? `(±${accuracy}m)` : ""}` : "IP ESTIMATE"}
+                      </Text>
                     </View>
                     {wifi?.ssid ? (
                       <View style={styles.wifiBadgePill}>
@@ -976,7 +992,7 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
                       <View style={styles.infoRow}>
                         <Text style={styles.infoLabel}>Coordinates</Text>
                         <Text style={styles.infoValue}>
-                          {Number(lat).toFixed(4)}°, {Number(lon).toFixed(4)}°
+                          {Number(lat).toFixed(6)}°, {Number(lon).toFixed(6)}° {accuracy ? `(±${accuracy}m)` : ""}
                         </Text>
                       </View>
                     ) : null}
@@ -991,6 +1007,9 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
                           mapUrl = `https://www.google.com/maps?q=${lat},${lon}`;
                         } else if (city || country) {
                           mapUrl = `https://www.google.com/maps?q=${encodeURIComponent(`${city} ${country}`.trim())}`;
+                        } else {
+                          void locateLaptop();
+                          return;
                         }
                         if (Platform.OS === "web") {
                           if (typeof window !== "undefined") {
