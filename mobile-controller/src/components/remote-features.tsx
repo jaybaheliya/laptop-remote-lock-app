@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  FlatList,
   Alert,
   Linking,
   Modal,
   Platform,
-  ScrollView,
   Share,
   StyleSheet,
   Switch,
@@ -1262,23 +1262,21 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
               {closingBrowsers ? <ActivityIndicator color="#fda4af" size="small" /> : <Text style={styles.closeBrowsersBtnText}>🛑 Close Browsers</Text>}
             </TouchableOpacity>
           </View>
-          {tasks.length > 5 ? (
-            <ScrollView style={styles.scrollContainerTasks} nestedScrollEnabled showsVerticalScrollIndicator>
-              {tasks.map((task) => (
-                <View key={task.process_id} style={styles.taskRow}>
-                  <View style={styles.taskDetails}><Text style={styles.taskName} numberOfLines={1}>{task.name}</Text><Text style={styles.taskMeta} numberOfLines={1}>{task.window || "PID " + task.process_id} | {task.memory_mb} MB</Text></View>
-                  <TouchableOpacity style={styles.endButton} onPress={() => confirmEndTask(task)} disabled={!online || sending || commandBusy || !!localActiveCommand}><Text style={styles.endButtonText}>End</Text></TouchableOpacity>
-                </View>
-              ))}
-            </ScrollView>
-          ) : (
-            tasks.map((task) => (
-              <View key={task.process_id} style={styles.taskRow}>
+          <FlatList
+            style={styles.scrollContainerTasks}
+            data={tasks}
+            keyExtractor={(task) => String(task.process_id)}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+            showsVerticalScrollIndicator={false}
+            ListEmptyComponent={<Text style={styles.muted}>Refresh to see open desktop apps.</Text>}
+            renderItem={({ item: task }) => (
+              <View style={styles.taskRow}>
                 <View style={styles.taskDetails}><Text style={styles.taskName} numberOfLines={1}>{task.name}</Text><Text style={styles.taskMeta} numberOfLines={1}>{task.window || "PID " + task.process_id} | {task.memory_mb} MB</Text></View>
                 <TouchableOpacity style={styles.endButton} onPress={() => confirmEndTask(task)} disabled={!online || sending || commandBusy || !!localActiveCommand}><Text style={styles.endButtonText}>End</Text></TouchableOpacity>
               </View>
-            ))
-          )}
+            )}
+          />
           {!taskLoading && tasks.length === 0 && <Text style={styles.muted}>Refresh to see open desktop apps.</Text>}
         </>}
       </View>
@@ -1365,13 +1363,18 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
               );
             });
 
-            return files.length > 5 ? (
-              <ScrollView style={styles.scrollContainerFiles} nestedScrollEnabled showsVerticalScrollIndicator>
-                {fileCards}
-              </ScrollView>
-            ) : (
-              fileCards
-            );
+            return (
+            <FlatList
+              style={styles.scrollContainerFiles}
+              data={files}
+              keyExtractor={(file, idx) => file.name + idx}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+              showsVerticalScrollIndicator={false}
+              ListEmptyComponent={<Text style={styles.muted}>No recent files found in this folder.</Text>}
+              renderItem={({ index: idx }) => fileCards[idx]}
+            />
+          );;
           })()}
           {!filesLoading && files.length === 0 && (
             <Text style={styles.muted}>
@@ -1444,13 +1447,18 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
             );
           });
 
-          return recordings.length > 5 ? (
-            <ScrollView style={styles.scrollContainerRecordings} nestedScrollEnabled showsVerticalScrollIndicator>
-              {recordingCards}
-            </ScrollView>
-          ) : (
-            recordingCards
-          );
+          return (
+            <FlatList
+              style={styles.scrollContainerRecordings}
+              data={recordings}
+              keyExtractor={(item) => item.id}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+              showsVerticalScrollIndicator={false}
+              ListEmptyComponent={<Text style={styles.muted}>Your saved clips will appear here. Turn on the phone-copy option before recording to open and share them from this list.</Text>}
+              renderItem={({ item }) => recordingCards[recordings.indexOf(item)]}
+            />
+          );;
         })()}
         {!recordingsLoading && recordings.length === 0 && <Text style={styles.muted}>Your saved clips will appear here. Turn on the phone-copy option before recording to open and share them from this list.</Text>}
       </View>
@@ -1479,13 +1487,18 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
               </View>
             ));
 
-            return notes.length > 5 ? (
-              <ScrollView style={styles.scrollContainerNotes} nestedScrollEnabled showsVerticalScrollIndicator>
-                {noteRows}
-              </ScrollView>
-            ) : (
-              noteRows
-            );
+            return (
+            <FlatList
+              style={styles.scrollContainerNotes}
+              data={notes}
+              keyExtractor={(note) => note.id}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+              showsVerticalScrollIndicator={false}
+              ListEmptyComponent={<Text style={styles.muted}>Notes you save here are private to your account.</Text>}
+              renderItem={({ item }) => noteRows[notes.indexOf(item)]}
+            />
+          );;
           })()}
           {!notesLoading && notes.length === 0 && <Text style={styles.muted}>Notes you save here are private to your account.</Text>}
         </>}
