@@ -9,7 +9,34 @@
 import { StyleSheet } from 'react-native';
 import { Platform } from 'react-native';
 
-export const Colors = {
+export type ThemeColors = {
+  background: string;
+  surface: string;
+  surfaceElevated: string;
+  surfaceHover: string;
+  surfaceActive: string;
+  text: string;
+  textSecondary: string;
+  textMuted: string;
+  textOnPrimary: string;
+  border: string;
+  borderStrong: string;
+  primary: string;
+  primaryHover: string;
+  primarySoft: string;
+  success: string;
+  successSoft: string;
+  warning: string;
+  warningSoft: string;
+  danger: string;
+  dangerSoft: string;
+  chart: string;
+  overlay: string;
+  backgroundElement: string;
+  backgroundSelected: string;
+};
+
+export const Colors: Record<'light' | 'dark', ThemeColors> = {
   light: {
     // Surfaces
     background: '#f8fafc',
@@ -25,6 +52,10 @@ export const Colors = {
     // Borders
     border: '#e2e8f0',
     borderStrong: '#cbd5e1',
+    // Legacy aliases used by the starter ThemedView/ThemedText components.
+    // Kept so the template UI keeps rendering; prefer surfaceHover/surfaceActive.
+    backgroundElement: '#f1f5f9',
+    backgroundSelected: '#e2e8f0',
     // Brand / accent
     primary: '#2563eb',
     primaryHover: '#1d4ed8',
@@ -55,6 +86,10 @@ export const Colors = {
     // Borders
     border: 'rgba(255, 255, 255, 0.08)',
     borderStrong: 'rgba(255, 255, 255, 0.16)',
+    // Legacy aliases used by the starter ThemedView/ThemedText components.
+    // Kept so the template UI keeps rendering; prefer surfaceHover/surfaceActive.
+    backgroundElement: '#162032',
+    backgroundSelected: '#1e293b',
     // Brand / accent
     primary: '#38bdf8',
     primaryHover: '#0ea5e9',
@@ -72,7 +107,6 @@ export const Colors = {
   },
 } as const;
 
-export type ThemeColors = typeof Colors.light;
 export type ThemeColor = keyof ThemeColors;
 
 export const Spacing = {

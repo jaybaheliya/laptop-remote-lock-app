@@ -16,8 +16,7 @@ export type ThemeMode = 'light' | 'dark';
 export function useTheme(): ThemeColors {
   const scheme = useColorScheme();
   return useMemo(() => {
-    if (scheme === 'dark') return Colors.dark;
-    return Colors.light;
+    return (scheme === 'dark' ? Colors.dark : Colors.light) as ThemeColors;
   }, [scheme]);
 }
 

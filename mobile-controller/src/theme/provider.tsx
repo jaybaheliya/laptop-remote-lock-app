@@ -71,12 +71,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // While hydrating, fall back to the system scheme so we don't flash the
   // wrong theme before the stored preference is read.
   if (!hydrated) {
-    const fallbackColors = Colors[systemScheme === 'dark' ? 'dark' : 'light'];
+    const fallbackResolved = systemScheme === 'dark' ? 'dark' : 'light';
+    const fallbackColors: ThemeColors =
+      fallbackResolved === 'dark' ? Colors.dark : Colors.light;
     return (
       <ThemeContext.Provider
         value={{
           mode: 'system',
-          resolved: systemScheme === 'dark' ? 'dark' : 'light',
+          resolved: fallbackResolved,
           colors: fallbackColors,
           setMode,
           toggle,
