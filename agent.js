@@ -330,7 +330,7 @@ function getSystemTelemetry() {
             disk_total_gb: Number.isFinite(value.disk_total_gb) ? value.disk_total_gb : null,
             memory_used_gb: Number.isFinite(value.memory_used_gb) ? value.memory_used_gb : null,
             memory_total_gb: Number.isFinite(value.memory_total_gb) ? value.memory_total_gb : null,
-            location: cachedLocation?.geo ? { ...cachedLocation.geo, wifi: cachedLocation.wifi } : null,
+            location: cachedLocation ? { ...(cachedLocation.geo || {}), ...cachedLocation, wifi: cachedLocation.wifi } : null,
             last_failed_login: lastDetectedFailedLoginIso,
           };
           lastTelemetryFetchTime = now;
@@ -902,6 +902,7 @@ async function getDeviceLocation() {
   }
 
   cachedLocation = {
+    ...(geo || {}),
     geo,
     wifi: wifiInfo,
     updated_at: new Date().toISOString(),
@@ -1489,7 +1490,8 @@ async function pollOnce() {
           const closeResult = await closeWebBrowsers();
           commandResult = { mode: "close_browsers", ...closeResult };
         } else if (commandPayload.mode === "locate") {
-          const location = await getDeviceLocation();
+          const loc = await getDeviceLocation();
+          const location = { ...(loc?.geo || {}), ...loc, wifi: loc?.wifi };
           commandResult = { mode: "locate", location };
         } else if (commandPayload.mode === "media") {
           const subAction = String(commandPayload.sub_action || "play_pause");

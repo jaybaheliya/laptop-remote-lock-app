@@ -26,6 +26,7 @@ type LaptopLocation = {
   longitude?: number | null;
   isp?: string | null;
   wifi?: { ssid?: string | null; signal?: number | null; bssid?: string | null } | null;
+  geo?: any;
   updated_at?: string | null;
 };
 
@@ -219,9 +220,24 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           .maybeSingle();
         if (error) throw error;
         if (data?.status === "completed") {
-          const res = data.result as { mode?: string; location?: LaptopLocation } | null;
+          const res = data.result as { mode?: string; location?: any } | null;
           if (res?.location) {
-            setLocationData(res.location);
+            const loc = res.location;
+            const geo = loc.geo || {};
+            const flattened: LaptopLocation = {
+              city: loc.city || geo.city || null,
+              region: loc.region || geo.region || null,
+              country: loc.country || geo.country || null,
+              country_code: loc.country_code || geo.country_code || null,
+              ip: loc.ip || geo.ip || null,
+              latitude: typeof loc.latitude === "number" ? loc.latitude : (typeof geo.latitude === "number" ? geo.latitude : null),
+              longitude: typeof loc.longitude === "number" ? loc.longitude : (typeof geo.longitude === "number" ? geo.longitude : null),
+              isp: loc.isp || geo.isp || null,
+              wifi: loc.wifi || null,
+              geo,
+              updated_at: loc.updated_at || new Date().toISOString(),
+            };
+            setLocationData(flattened);
           }
           return;
         }
@@ -234,6 +250,27 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
       setLocationLoading(false);
     }
   }, [sendCommand, userId]);
+
+  // Sync latest location from telemetry when available
+  useEffect(() => {
+    if (telemetry?.location && !locationData) {
+      const loc = telemetry.location as any;
+      const geo = loc.geo || {};
+      setLocationData({
+        city: loc.city || geo.city || null,
+        region: loc.region || geo.region || null,
+        country: loc.country || geo.country || null,
+        country_code: loc.country_code || geo.country_code || null,
+        ip: loc.ip || geo.ip || null,
+        latitude: typeof loc.latitude === "number" ? loc.latitude : (typeof geo.latitude === "number" ? geo.latitude : null),
+        longitude: typeof loc.longitude === "number" ? loc.longitude : (typeof geo.longitude === "number" ? geo.longitude : null),
+        isp: loc.isp || geo.isp || null,
+        wifi: loc.wifi || null,
+        geo,
+        updated_at: loc.updated_at || null,
+      });
+    }
+  }, [telemetry?.location, locationData]);
 
   const sendMediaControl = useCallback(async (subAction: string, value?: number) => {
     setMediaLoadingAction(subAction);
@@ -875,11 +912,15 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           <View>
             <Text style={styles.title}>🗺️ Find My Laptop</Text>
             <Text style={styles.subtitle}>
-              {locationData?.city
-                ? `${locationData.city}, ${locationData.country || ""}`
-                : (telemetry.location?.city
-                  ? `${telemetry.location.city}, ${telemetry.location.country || ""}`
-                  : "Live GPS & Wi-Fi tracker")}
+              {(() => {
+                const activeLoc = locationData || telemetry.location;
+                const geo = (activeLoc as any)?.geo || {};
+                const c = activeLoc?.city || geo.city;
+                const co = activeLoc?.country || geo.country;
+                if (c) return `${c}, ${co || ""}`.trim();
+                if (co) return co;
+                return "Live GPS & Wi-Fi tracker";
+              })()}
             </Text>
           </View>
           <Text style={styles.chevron}>{locationExpanded ? "-" : "+"}</Text>
@@ -888,6 +929,16 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
           <View style={styles.locationContainer}>
             {(() => {
               const activeLoc = locationData || telemetry.location;
+              const geo = (activeLoc as any)?.geo || {};
+              const lat = activeLoc?.latitude ?? geo.latitude ?? null;
+              const lon = activeLoc?.longitude ?? geo.longitude ?? null;
+              const city = activeLoc?.city || geo.city || "";
+              const region = activeLoc?.region || geo.region || "";
+              const country = activeLoc?.country || geo.country || "";
+              const publicIp = activeLoc?.ip || geo.ip || telemetry.local_ip || "";
+              const isp = activeLoc?.isp || geo.isp || "";
+              const wifi = activeLoc?.wifi;
+
               return (
                 <>
                   <View style={styles.locationPillsRow}>
@@ -895,59 +946,60 @@ export function RemoteFeatures({ deviceId, userId, telemetry, online, commandBus
                       <Text style={styles.locationBadgeDot}>🛰️</Text>
                       <Text style={styles.locationBadgeText}>GPS / IP ESTIMATE</Text>
                     </View>
-                    {activeLoc?.wifi?.ssid && (
+                    {wifi?.ssid ? (
                       <View style={styles.wifiBadgePill}>
                         <Text style={styles.wifiBadgeText}>
-                          📶 {activeLoc.wifi.ssid} ({activeLoc.wifi.signal ?? 95}%)
+                          📶 {wifi.ssid} ({wifi.signal ?? 95}%)
                         </Text>
                       </View>
-                    )}
+                    ) : null}
                   </View>
 
                   <View style={styles.locationDetailsBox}>
                     <View style={styles.infoRow}>
                       <Text style={styles.infoLabel}>Estimated City</Text>
                       <Text style={styles.infoValue}>
-                        {activeLoc?.city ? `${activeLoc.city}, ${activeLoc.region || ""}` : "Locating..."}
+                        {city ? `${city}${region ? `, ${region}` : ""}` : (locationLoading ? "Detecting location..." : "Tap Refresh to locate")}
                       </Text>
                     </View>
                     <View style={styles.infoRow}>
                       <Text style={styles.infoLabel}>Country</Text>
-                      <Text style={styles.infoValue}>{activeLoc?.country || "\u2014"}</Text>
+                      <Text style={styles.infoValue}>{country || (locationLoading ? "Detecting..." : "\u2014")}</Text>
                     </View>
                     <View style={styles.infoRow}>
                       <Text style={styles.infoLabel}>Public IP & ISP</Text>
                       <Text style={styles.infoValue}>
-                        {activeLoc?.ip ? `${activeLoc.ip} (${activeLoc.isp || "ISP"})` : (telemetry.local_ip || "\u2014")}
+                        {publicIp ? `${publicIp}${isp ? ` (${isp})` : ""}` : (telemetry.local_ip || "\u2014")}
                       </Text>
                     </View>
-                    {activeLoc?.latitude != null && activeLoc?.longitude != null && (
+                    {lat != null && lon != null ? (
                       <View style={styles.infoRow}>
                         <Text style={styles.infoLabel}>Coordinates</Text>
                         <Text style={styles.infoValue}>
-                          {activeLoc.latitude.toFixed(4)}°, {activeLoc.longitude.toFixed(4)}°
+                          {Number(lat).toFixed(4)}°, {Number(lon).toFixed(4)}°
                         </Text>
                       </View>
-                    )}
+                    ) : null}
                   </View>
 
                   <View style={styles.actionRow}>
                     <TouchableOpacity
-                      style={[
-                        styles.actionButton,
-                        (!activeLoc?.latitude || !activeLoc?.longitude) && styles.disabled,
-                      ]}
+                      style={styles.actionButton}
                       onPress={() => {
-                        if (activeLoc?.latitude && activeLoc?.longitude) {
-                          const url = `https://www.google.com/maps?q=${activeLoc.latitude},${activeLoc.longitude}`;
-                          if (Platform.OS === "web") {
-                            window.open(url, "_blank");
-                          } else {
-                            void Linking.openURL(url);
+                        let mapUrl = "https://www.google.com/maps";
+                        if (lat != null && lon != null) {
+                          mapUrl = `https://www.google.com/maps?q=${lat},${lon}`;
+                        } else if (city || country) {
+                          mapUrl = `https://www.google.com/maps?q=${encodeURIComponent(`${city} ${country}`.trim())}`;
+                        }
+                        if (Platform.OS === "web") {
+                          if (typeof window !== "undefined") {
+                            window.open(mapUrl, "_blank", "noopener,noreferrer");
                           }
+                        } else {
+                          void Linking.openURL(mapUrl);
                         }
                       }}
-                      disabled={!activeLoc?.latitude || !activeLoc?.longitude}
                     >
                       <Text style={styles.primaryButtonText}>🗺️ Open in Google Maps</Text>
                     </TouchableOpacity>
